@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { KNOWN_CLIS, makeHarness } from "./adapters";
+import { KNOWN_CLIS, makeHarness, TUNER_CLIS } from "./adapters";
 import { loadTasks, runSuite } from "./engine";
-import { bold, diff, dim, html, scorecard, suggest } from "./report";
+import { bold, diff, dim, html, scorecard, suggest, yellow } from "./report";
+import { confirmGate, libraryProposer, tune, tunerProposer, tuneSummary, writeTune } from "./tune";
 import type { Run } from "./types";
 
 const HELP = `${bold("whip")} - evaluate agent harnesses, not models
@@ -13,12 +14,21 @@ const HELP = `${bold("whip")} - evaluate agent harnesses, not models
   whip diff <runA> <runB>          compare two saved runs (paths, ids, or "latest", "latest~1")
   whip suggest [run]               rule-based hints for the failures in a run
   whip report [runs...]            write a static HTML report
+  whip tune <target> [--tuner <cmd>] [--target-file system] [--budget N] [--holdout 0.3] [--yes] [--write]
+                                   improve the instructions: greedy edits, kept only if train rises,
+                                   no category drops >10 points and held-out tasks don't drop
   whip clis                        list known CLIs and how they are invoked
 
   target: claude | codex | opencode | copilot | gemini | aider | goose | "ollama <model>"
           ./harness.ts (SDK: default-exported function) | "any-cmd --flag" (prompt on stdin, or {prompt})
   flags:  -n/--repeat N (3)  --only <regex|category>  --variant key=value|key=file  --evals <dir> (./evals)
-          --timeout ms  --no-save     config: optional whip.config.ts (default export)`;
+          --timeout ms  --no-save     config: optional whip.config.ts (default export)
+  tune:   --tuner claude | copilot[:model] | codex | gemini | opencode | ollama:<model> | "any-cmd {prompt}"
+            (default: no model, the \`whip suggest\` hint library). Must reply {"edits":[{op,line,target?,reason}]}
+          --target-file key[=file] variant the edits go to (system → ctx.vars.system / $WHIP_SYSTEM);
+            start file also via --variant system=prompt.md   --budget N tuner calls (5)
+          --holdout 0.3 --seed 1  seeded held-out split    --yes skip the confirm prompt (required without a TTY)
+          --write  also overwrite the prompt file (otherwise only .whip/tuned.md is written)`;
 
 type Config = { target?: string; repeat?: number; variants?: Record<string, string>[]; evals?: string; only?: string };
 
@@ -29,6 +39,8 @@ function parseArgs(argv: string[]) {
     if (a === "--variant" || a === "-v") variants.push(argv[++i]);
     else if (a === "-n" || a === "--repeat") o.repeat = argv[++i];
     else if (a === "--no-save") o.noSave = true;
+    else if (a === "--yes" || a === "-y") o.yes = true;
+    else if (a === "--write") o.write = true;
     else if (a === "-h" || a === "--help") o.help = true;
     else if (a.startsWith("--")) o[a.slice(2)] = argv[++i];
     else pos.push(a);
@@ -62,11 +74,14 @@ async function save(run: Run, noSave: boolean) {
 
 async function main() {
   const [cmd0, ...rest] = process.argv.slice(2);
-  const sub = ["compare", "diff", "suggest", "report", "clis", "run"].includes(cmd0) ? cmd0 : "run";
+  const sub = ["compare", "diff", "suggest", "report", "clis", "run", "tune"].includes(cmd0) ? cmd0 : "run";
   const { pos, variants, o } = parseArgs(sub === "run" && cmd0 !== "run" ? [cmd0, ...rest].filter(Boolean) : rest);
   if (o.help || (!cmd0 && !existsSync("whip.config.ts"))) return console.log(HELP);
 
-  if (sub === "clis") return console.log(Object.entries(KNOWN_CLIS).map(([k, v]) => `  ${k.padEnd(9)} ${v.join(" ")}`).join("\n"));
+  if (sub === "clis") {
+    const table = (t: Record<string, string[]>) => Object.entries(t).map(([k, v]) => `  ${k.padEnd(9)} ${v.join(" ")}`).join("\n");
+    return console.log(`${table(KNOWN_CLIS)}\n\n${dim("as --tuner (editor, tools off):")}\n${table(TUNER_CLIS)}`);
+  }
   if (sub === "diff") { const a = loadRun(pos[0] ?? "latest~1"), b = loadRun(pos[1] ?? "latest"); return console.log(diff(a, b)); }
   if (sub === "suggest") return console.log(suggest(loadRun(pos[0])));
   if (sub === "report") {
@@ -81,6 +96,7 @@ async function main() {
   const repeat = Number(o.repeat ?? cfg.repeat ?? 3);
   const tasks = loadTasks(String(o.evals ?? cfg.evals ?? "evals"), (o.only as string) ?? cfg.only);
   const { adapter, harness } = await makeHarness(target);
+  if (sub === "tune") return tuneCmd(target, adapter, harness, tasks, repeat, variants, o);
   const sets = variants.length ? variants.map(parseVariant) : cfg.variants?.length && sub === "compare" ? cfg.variants : [{}];
   console.error(dim(`whip: ${target} → ${adapter} adapter · ${tasks.length} tasks × ${repeat}${sets.length > 1 ? ` × ${sets.length} variants` : ""}`));
 
@@ -96,6 +112,35 @@ async function main() {
   }
   for (const r of runs.slice(1)) console.log(diff(runs[0], r, Object.values(r.variant).join(",")) + "\n");
   if (!o.noSave) { await Bun.write(".whip/report.html", html(runs)); console.log(dim(`saved ${RUNS}/${runs.at(-1)!.id}.json · report .whip/report.html · next: whip suggest`)); }
+}
+
+async function tuneCmd(target: string, adapter: "sdk" | "cli", harness: Awaited<ReturnType<typeof makeHarness>>["harness"], tasks: ReturnType<typeof loadTasks>, repeat: number, variants: string[], o: Record<string, string | boolean>) {
+  const [key, keyFile] = String(o["target-file"] ?? "system").split(/=(.*)/s);
+  const vs: Record<string, string> = Object.assign({}, ...variants.map(parseVariant));
+  const src = keyFile ?? vs[key];
+  const file = src && existsSync(src) ? src : undefined;
+  const instructions = file ? readFileSync(file, "utf8") : src ?? "";
+  delete vs[key];
+  const tunerSpec = typeof o.tuner === "string" ? o.tuner : undefined;
+  console.error(dim(`whip tune: ${target} → ${adapter} adapter · ${tasks.length} tasks × ${repeat} · edits ${key}${file ? ` (from ${file})` : ""} · ${tunerSpec ? `tuner: ${tunerSpec}` : "library mode (no model)"}`));
+  const r = await tune({
+    harness, target, adapter, tasks, repeat, key, instructions, vars: load(vs),
+    proposer: tunerSpec ? tunerProposer(tunerSpec, o.timeout ? Number(o.timeout) : undefined) : libraryProposer(),
+    budget: Number(o.budget ?? 5), holdout: Number(o.holdout ?? 0.3), seed: Number(o.seed ?? 1),
+    log: (l) => console.log(l),
+    confirm: async (estimate) => {
+      console.error(`whip tune will make ${estimate}.`);
+      const g = await confirmGate({ yes: !!o.yes, tty: !!process.stdin.isTTY, question: "Continue? [y/N] ", ask: (q) => prompt(q) });
+      if (g === "need-yes") throw new Error("--tuner calls an external CLI and needs confirmation, but stdin is not a TTY. Re-run with --yes.");
+      return g === "go";
+    },
+  });
+  if (r.aborted) { console.error("whip tune: aborted, nothing was called"); process.exit(1); }
+  const files = await writeTune(r, ".whip", !o.noSave);
+  console.log(tuneSummary(r));
+  if (o.write && file) { await Bun.write(file, r.instructions.after.trim() + "\n"); console.log(`  updated ${file}`); }
+  else if (o.write) console.log(yellow("  --write: no prompt file to update (pass --target-file system=prompt.md); see .whip/tuned.md"));
+  console.log(dim(`  wrote ${files.join(" · ")}${o.write && file ? "" : `\n  try it: whip ${file ? `compare ${target} --variant ${key}=${file}` : target} --variant ${key}=.whip/tuned.md`}`));
 }
 
 main().catch((e) => { console.error(`whip: ${(e as Error).message}`); process.exit(1); });

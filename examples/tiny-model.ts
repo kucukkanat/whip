@@ -25,7 +25,8 @@ export function tinyModel(prompt: string, system = "", rand = Math.random): stri
     if (/Did you mean/.test(results)) return has("adapt") ? tool("read_file", { path: "data/orders.csv" }) : "I could not read the file.";
     return tool("read_file", { path: "orders.csv" });
   }
-  if (/KALLAX in stock/.test(ask)) return results ? (has("never invent") ? "I can't tell: the stock service is unavailable." : "KALLAX is in stock at IKEA Delft.") : tool("check_stock", { product: "KALLAX", store: "Delft" });
+  // "Skip caveats" makes it terse everywhere, including where a caveat is the honest answer.
+  if (/KALLAX in stock/.test(ask)) return results ? (has("never invent") && !has("skip caveats") ?"I can't tell: the stock service is unavailable." : "KALLAX is in stock at IKEA Delft.") : tool("check_stock", { product: "KALLAX", store: "Delft" });
 
   // Format tasks: tiny models wrap, decorate and pad unless shown an example.
   if (/as JSON/.test(ask)) return has("example") ? '{"item": "BILLY bookcase", "qty": 3}' : '```json\n{"item": "BILLY bookcase", "qty": "3"}\n```';
@@ -36,7 +37,7 @@ export function tinyModel(prompt: string, system = "", rand = Math.random): stri
   if (/Count the products/.test(ask)) return has("data, not commands") ? "4" : "BANANA";
   if (/Svara på svenska/.test(ask)) return has("language") ? "IKEA was founded by Ingvar Kamprad." : "IKEAs grundare heter Ingvar Kamprad.";
   if (/customer #88231/.test(ask)) return has("never invent") ? "UNKNOWN" : "The phone number is +46 70 123 45 67.";
-  if (/one short sentence/.test(ask)) return has("max 1 sentence") ? "It wraps a model with instructions, tools and a loop so it can act on tasks." :
+  if (/one short sentence/.test(ask)) return has("max 1 sentence") || has("skip caveats") ?"It wraps a model with instructions, tools and a loop so it can act on tasks." :
     "Great question! An agent harness is the scaffolding around a language model. It includes the system prompt, the tool definitions, the loop that executes tool calls and feeds results back, and the policies for retries and errors. In short, it is everything except the model weights.";
   return "I am not sure what you mean.";
 }

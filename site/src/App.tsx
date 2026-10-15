@@ -36,6 +36,7 @@ export function TopBar({ onSearch }: { onSearch: () => void }) {
         <a className="rounded-md px-3 py-2 hover:text-zinc-950 dark:hover:text-white" href="#/docs/quickstart">Docs</a>
         <a className="rounded-md px-3 py-2 hover:text-zinc-950 dark:hover:text-white" href="#/docs/checks">Checks</a>
         <a className="rounded-md px-3 py-2 hover:text-zinc-950 dark:hover:text-white" href="#/docs/compare">Compare</a>
+        <a className="rounded-md px-3 py-2 hover:text-zinc-950 dark:hover:text-white" href="#/docs/tuning">Tune</a>
       </nav>
       <button onClick={onSearch} className="ml-auto flex h-10 min-w-0 items-center gap-3 rounded-lg border border-zinc-200 px-3 text-sm text-zinc-500 hover:border-zinc-400 sm:w-72 dark:border-zinc-800" aria-label="Search docs (Command K)">
         <span aria-hidden>⌕</span><span className="hidden sm:inline">Search docs…</span>

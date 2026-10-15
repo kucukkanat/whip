@@ -9,7 +9,7 @@ const INDEX: Entry[] = PAGES.flatMap((p) => {
   let cur: Entry | null = null;
   for (const l of p.md.split("\n")) {
     if (/^#{2,3} /.test(l)) { const t = l.replace(/^#+ /, ""); cur = { slug: p.slug, anchor: slugify(t), title: t, page: p.title, category: p.category, text: "" }; e.push(cur); }
-    else if (!l.startsWith("```")) (cur ?? e[0]).text += " " + l.replace(/[`*|]/g, " ");
+    else if (!l.startsWith("```")) (cur ?? e[0]).text += " " + l.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").replace(/[`*|>]/g, " ");
   }
   return e;
 });

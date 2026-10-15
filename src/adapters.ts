@@ -14,7 +14,33 @@ export const KNOWN_CLIS: Record<string, string[]> = {
   ollama: ["ollama", "run", "{model}", "{prompt}"],
 };
 
-const isFile = (t: string) => /\.(m?[jt]sx?)$/.test(t);
+/** Copilot as an editor: plain text out, no tools, no MCP servers, never waits for input. */
+export const COPILOT_SAFE = ["--silent", "--no-color", "--no-ask-user", "--disable-builtin-mcps", "--deny-tool=shell", "--deny-tool=write"];
+
+/** Known CLIs as `whip tune --tuner` editors: text in, text out, tools off where the CLI allows it. */
+export const TUNER_CLIS: Record<string, string[]> = {
+  claude: ["claude", "-p", "{prompt}", "--disallowedTools", "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch"],
+  copilot: ["copilot", "-p", "{prompt}", ...COPILOT_SAFE],
+  codex: ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "{prompt}"],
+  gemini: ["gemini", "-p", "{prompt}"],
+  opencode: ["opencode", "run", "{prompt}"],
+  ollama: ["ollama", "run", "{model}", "{prompt}"],
+};
+
+/** `claude` | `copilot:<model>` | `ollama:qwen2.5:14b` | any command (`{prompt}` or stdin). Copilot always gets COPILOT_SAFE. */
+export function resolveTuner(spec: string): { argv: string[]; stdin: boolean } {
+  const m = spec.trim().match(/^([\w-]+)(?::(\S+))?$/);
+  if (m && TUNER_CLIS[m[1]]) {
+    const base = TUNER_CLIS[m[1]], model = m[2];
+    if (base.includes("{model}")) return { argv: base.map((a) => (a === "{model}" ? model ?? "qwen2.5:14b" : a)), stdin: false };
+    return { argv: model ? [...base, "--model", model] : base, stdin: false };
+  }
+  const r = resolveCommand(spec);
+  if (r.argv[0]?.split("/").pop() === "copilot") r.argv = [...r.argv.filter((a) => a !== "--allow-all-tools"), ...COPILOT_SAFE.filter((f) => !r.argv.includes(f))];
+  return r;
+}
+
+const isFile =(t: string) => /\.(m?[jt]sx?)$/.test(t);
 export const detect = (target: string): "sdk" | "cli" => (isFile(target) && !/\s/.test(target.trim()) ? "sdk" : "cli");
 
 /** Optional helper; plain default-exported functions work too. */

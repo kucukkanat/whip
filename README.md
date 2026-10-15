@@ -69,9 +69,40 @@ whip compare ./my-harness.ts --variant system=prompts/a.md --variant system=prom
 whip diff latest~1 latest      # any two saved runs (ids, paths, latest, latest~N)
 whip suggest                   # rule-based hints from the latest failures, no model needed
 whip report latest~1 latest    # static HTML at .whip/report.html
+whip tune ./my-harness.ts      # let Whip propose, score and keep prompt edits (see Tuning)
 ```
 
 The first variant is the baseline. Whip prints deltas per category and per task and marks tasks that **flipped**. Change one element per variant so the delta has one cause.
+
+## Tuning: let Whip edit the prompt
+
+```sh
+whip tune examples/mock-tiny.ts                                      # library mode: no model, ~29% → 100%
+whip tune examples/mock-tiny.ts --tuner "bun examples/mock-tuner.ts" --yes   # offline mock editor
+whip tune ./my-harness.ts --target-file system=prompts/a.md \
+  --tuner "copilot --model <claude-opus-id> -p {prompt}"             # a real model as editor
+whip tune ./my-harness.ts --target-file system=prompts/a.md --tuner copilot:<claude-opus-id>   # same via preset
+```
+
+`whip tune` runs the compare loop for you, one edit at a time:
+
+1. **Split.** A seeded split (`--seed 1`) holds out `--holdout 0.3` of the suite. Held-out tasks are spread across categories and never shown to the proposer. Baseline is scored on both halves with the usual `-n` repeats.
+2. **Propose.** By default the proposer is the `whip suggest` hint library: each failure type maps to drop-in instruction lines. With `--tuner <cmd>`, any CLI becomes the editor. It gets the current instructions plus the failed train tasks (prompt, actual output, broken check) and must reply `{"edits":[{"op":"add"|"replace"|"remove","line":"…","target":"…","reason":"…"}]}`. Code fences, surrounding prose, a bare edit object or trailing junk are all fine.
+3. **Score and keep.** Each edit is scored against the current instructions and **kept only if** train rises, no category drops more than 10 points, and the held-out score doesn't drop. Kept edits stack. A drop only counts if it is bigger than measurement noise (two standard errors from tasks that pass only sometimes; zero when every task always passes or always fails). When noise could have decided a verdict, or a rejection would throw away a train gain, both sides are re-scored once and the verdict uses the pooled attempts.
+4. **Stop and prune.** Tuning stops when all train tasks pass, at a plateau, or when `--budget` tuner calls (default 5) are spent. A last pass removes every line whose removal costs nothing.
+
+```
+✓ +If the information is not in the prompt or …   17 → 33   kept (library)
+✗ +Be concise: answer directly and skip caveat…   47 → 42   rejected (honesty −50)
+✓ +If a tool returns ERROR, read it, then retr…   58 → 67   kept (library)
+```
+
+Results: `.whip/tuned.md` (the new instructions), `.whip/tune-<id>.json` (every step, plus a changelog of which line fixed which tasks), a tune section in `.whip/report.html`, and the baseline and final runs in `.whip/runs/`. Your prompt file is only overwritten with `--write`. `--no-save` writes only `tuned.md`.
+
+- **Target vs tuner.** The target is the harness being scored. The tuner only edits text. Edits reach the target through the normal variant mechanism: `--target-file system` (default) means `ctx.vars.system` / `$WHIP_SYSTEM`. Start from a file with `--target-file system=prompts/a.md` or `--variant system=prompts/a.md`.
+- **Tuner presets** (`whip clis`): `claude`, `copilot`, `codex`, `gemini`, `opencode`, `ollama:<model>`, and `name:<model>` for a `--model` flag. They run in a throwaway directory with tools off where the CLI allows it. Copilot always gets `--silent --no-color --no-ask-user --disable-builtin-mcps --deny-tool=shell --deny-tool=write`, even in a custom command. Anything else works too: `--tuner "claude -p {prompt}"`, `--tuner "copilot --model <claude-opus-id> -p {prompt}"`, `--tuner "ollama run qwen2.5:14b"` (prompt on stdin without `{prompt}`).
+- **Confirmation.** Before the first tuner call Whip prints the estimated tuner and target calls and asks to continue. `--yes` skips the question. Without a TTY, `--yes` is required, otherwise it exits non-zero without calling anything. Library mode never calls a model and doesn't ask.
+- **When the library runs out.** If failures remain after library mode, the summary suggests `--tuner`.
 
 ## Default suite
 
@@ -120,9 +151,10 @@ src/cli.ts       commands and flags
 src/adapters.ts  SDK + CLI adapters, known CLI table, tool-call parsing
 src/engine.ts    task loading, sandbox, tool loop, repeats
 src/checks.ts    structured checks
-src/report.ts    scorecard, diff, suggest, HTML
+src/report.ts    scorecard, diff, suggest (+ the hint library), HTML
+src/tune.ts      whip tune: split, proposers, keep rules, greedy loop, prune
 tasks/           default suite
-examples/        offline fake tiny model (SDK and CLI), prompt variants, custom eval
+examples/        offline fake tiny model (SDK and CLI), mock tuner, prompt variants, custom eval
 site/            landing page + docs (Vite, React, Tailwind)
 ```
 

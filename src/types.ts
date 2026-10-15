@@ -37,3 +37,20 @@ export type Run = {
   whip: 1; id: string; target: string; adapter: "sdk" | "cli"; variant: Record<string, string>;
   repeat: number; startedAt: string; score: number; categories: Record<string, number>; tasks: TaskResult[];
 };
+
+/** One proposed instruction edit. `replace` swaps `target` for `line`; `remove` deletes `line`. */
+export type Edit = { op: "add" | "replace" | "remove"; line: string; target?: string; reason?: string };
+export type TuneStep = Edit & {
+  phase: "tune" | "prune"; source: string; kept: boolean; why: string;
+  train: [number, number]; heldout?: [number, number]; fixed: string[];
+};
+/** What `whip tune` writes to .whip/tune-<id>.json (and the report's tune section). */
+export type TuneLog = {
+  whip: 1; id: string; target: string; proposer: string; key: string; seed: number; holdout: number; repeat: number;
+  split: { train: string[]; heldout: string[] };
+  baseline: { score: number; train: number; heldout: number; categories: Record<string, number> };
+  final: { score: number; train: number; heldout: number; categories: Record<string, number> };
+  instructions: { before: string; after: string };
+  steps: TuneStep[]; changelog: { line: string; fixed: string[] }[];
+  kept: number; rejected: number; removed: number; tunerCalls: number; elapsedMs: number;
+};

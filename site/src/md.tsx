@@ -3,9 +3,10 @@ import { useState, type ReactNode } from "react";
 export const slugify = (s: string) => s.toLowerCase().replace(/[^\w]+/g, "-").replace(/^-|-$/g, "");
 
 function inline(s: string): ReactNode[] {
-  return s.split(/(`[^`]+`|\*\*[^*]+\*\*)/g).map((p, i) =>
+  return s.split(/(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/g).map((p, i) =>
     p.startsWith("`") ? <code key={i} className="rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-[0.85em] dark:bg-zinc-800/80">{p.slice(1, -1)}</code>
-    : p.startsWith("**") ? <strong key={i}>{p.slice(2, -2)}</strong> : p);
+    : p.startsWith("**") ? <strong key={i}>{p.slice(2, -2)}</strong>
+    : p.startsWith("[") ? (([, t, h]) => <a key={i} href={h} className="font-medium text-lime-700 underline decoration-lime/50 underline-offset-2 hover:decoration-lime dark:text-lime">{t}</a>)(p.match(/^\[([^\]]+)\]\(([^)]+)\)$/)!) : p);
 }
 
 export function Code({ code, lang }: { code: string; lang?: string }) {
@@ -23,7 +24,7 @@ export function Code({ code, lang }: { code: string; lang?: string }) {
   );
 }
 
-/** Tiny markdown subset: ##/### headings, paragraphs, lists, fenced code, tables. */
+/** Tiny markdown subset: ##/### headings, paragraphs, lists, fenced code, tables, `> ` callouts (first **bold** run is the title). */
 export function Md({ src }: { src: string }) {
   const lines = src.trim().split("\n"), out: ReactNode[] = [];
   for (let i = 0; i < lines.length; i++) {
@@ -42,6 +43,12 @@ export function Md({ src }: { src: string }) {
       out.push(<div key={i} className="my-4 overflow-x-auto rounded-xl border border-zinc-200 dark:border-zinc-800"><table className="w-full text-sm">
         <thead className="bg-zinc-50 text-left text-xs uppercase tracking-wide text-zinc-500 dark:bg-zinc-900/60"><tr>{rows[0].map((c, j) => <th key={j} className="px-4 py-2 font-medium">{inline(c)}</th>)}</tr></thead>
         <tbody>{rows.slice(1).map((r, k) => <tr key={k} className="border-t border-zinc-200 dark:border-zinc-800">{r.map((c, j) => <td key={j} className="px-4 py-2 align-top">{inline(c)}</td>)}</tr>)}</tbody></table></div>);
+    } else if (l.startsWith("> ")) {
+      const buf: string[] = [];
+      for (; i < lines.length && lines[i].startsWith(">"); i++) buf.push(lines[i].replace(/^> ?/, ""));
+      i--;
+      out.push(<aside key={i} role="note" className="my-5 rounded-xl border border-amber-300/60 bg-amber-50 px-4 py-3 text-sm leading-6 text-zinc-800 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-zinc-200">
+        {buf.filter((b) => b.trim()).map((b, j) => <p key={j} className={j ? "mt-2" : ""}>{inline(b)}</p>)}</aside>);
     } else if (/^(- |\d+\. )/.test(l)) {
       const ordered = /^\d/.test(l), items: string[] = [];
       for (; i < lines.length && /^(- |\d+\. )/.test(lines[i]); i++) items.push(lines[i].replace(/^(- |\d+\. )/, ""));
