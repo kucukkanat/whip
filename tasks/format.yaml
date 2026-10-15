@@ -1,0 +1,12 @@
+- id: format-json
+  category: format
+  prompt: 'Extract the order as JSON with keys "item" (string) and "qty" (number). Output only the JSON object. Order: three BILLY bookcases.'
+  checks: [ { json: { required: [item, qty], types: { item: string, qty: number }, exact: true } } ]
+- id: format-lines
+  category: format
+  prompt: "List exactly three colours, one per line, each line formatted as '- <colour>'. Nothing else."
+  checks: [ { lines: "^- [A-Za-z]+$", count: 3 } ]
+- id: format-exact
+  category: format
+  prompt: "Reply with exactly the word OK and nothing else."
+  checks: [ { regex: "^OK$", flags: "" } ]

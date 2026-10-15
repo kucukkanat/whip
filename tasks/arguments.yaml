@@ -1,0 +1,12 @@
+- id: args-date
+  category: arguments
+  prompt: "Put a meeting called Fika in my calendar on 3 March 2027."
+  tools:
+    - { name: create_event, description: "Create a calendar event. date must be YYYY-MM-DD", params: { title: string, date: string }, sim: { result: "created" } }
+  checks: [ { tool: create_event, args: { title: "/fika/i", date: "2027-03-03" } } ]
+- id: args-email
+  category: arguments
+  prompt: "Email anna.s@ikea.com with the subject 'Hej' and the body 'See you at 10'."
+  tools:
+    - { name: send_email, description: Send an email, params: { to: string, subject: string, body: string }, sim: { result: "sent" } }
+  checks: [ { tool: send_email, args: { to: "anna.s@ikea.com", subject: "Hej", body: "/see you at 10/i" } } ]

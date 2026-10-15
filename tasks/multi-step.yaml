@@ -1,0 +1,9 @@
+- id: edit-config
+  category: multi-step
+  prompt: "In config.json in the current directory, change the port from 3000 to 8080. Keep everything else."
+  files: { config.json: '{ "name": "shop", "port": 3000 }' }
+  checks: [ { file: config.json, contains: "8080" }, { file: config.json, contains: '"name"' } ]
+- id: create-file
+  category: multi-step
+  prompt: "Create a file named hello.txt in the current directory containing the single word hej."
+  checks: [ { file: hello.txt, contains: hej } ]

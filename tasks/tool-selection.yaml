@@ -1,0 +1,18 @@
+- id: tool-weather
+  category: tool-selection
+  prompt: What's the weather in Malmö right now?
+  tools: &tools
+    - { name: get_weather, description: Current weather for a city, params: { city: string }, sim: { result: "Malmö: 12°C, light rain" } }
+    - { name: search_web, description: General web search, params: { query: string }, sim: { result: "Various pages" } }
+    - { name: calc, description: Evaluate arithmetic, params: { expr: string }, sim: { result: "391" } }
+  checks: [ { tool: get_weather, args: { city: "/malm/i" } }, { contains: "12" } ]
+- id: tool-calc
+  category: tool-selection
+  prompt: What is 17 * 23? Use a tool if it helps, then answer with the number.
+  tools: *tools
+  checks: [ { tool: calc }, { contains: "391" } ]
+- id: tool-none-needed
+  category: tool-selection
+  prompt: "What is 2 + 2? Reply with only the number."
+  tools: *tools
+  checks: [ { noTool: true }, { regex: "^\\s*4\\s*$" } ]

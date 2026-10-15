@@ -1,0 +1,9 @@
+# Custom task: drop files like this into ./evals/ and Whip picks them up.
+- id: store-hours
+  category: tool-selection
+  prompt: "When does IKEA Delft open on Saturday?"
+  tools:
+    - { name: store_hours, description: "Opening hours for an IKEA store. Use for any opening-time question.", params: { store: string, day: string }, sim: { result: "Saturday 09:00-21:00" } }
+  checks:
+    - { tool: store_hours, args: { store: "/delft/i", day: "/sat/i" } }
+    - { contains: "09:00" }

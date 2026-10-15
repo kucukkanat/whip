@@ -1,0 +1,17 @@
+- id: recover-retry
+  category: recovery
+  prompt: "What is the status of order 1234?"
+  tools:
+    - { name: get_order, description: Look up an order by id, params: { id: string }, sim: { result: "status: shipped", failFirst: 1, error: "503 timeout, try again" } }
+  checks: [ { tool: get_order, minCalls: 2 }, { contains: shipped } ]
+- id: recover-path
+  category: recovery
+  prompt: "Read orders.csv and tell me how many rows it has (excluding the header)."
+  tools:
+    - name: read_file
+      description: Read a file by path
+      params: { path: string }
+      sim:
+        - { when: { path: data/orders.csv }, result: "id,qty\n1,2\n2,5\n3,1" }
+        - { result: "ERROR: not found. Did you mean data/orders.csv?" }
+  checks: [ { tool: read_file, args: { path: data/orders.csv } }, { regex: "\\b3\\b" } ]

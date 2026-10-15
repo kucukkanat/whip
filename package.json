@@ -1,0 +1,10 @@
+{
+  "name": "whip",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Whip: evaluate and improve AI agent harnesses, so tiny models do more.",
+  "bin": { "whip": "./src/cli.ts" },
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "test": "bun test", "demo": "bun src/cli.ts examples/mock-tiny.ts" }
+}
