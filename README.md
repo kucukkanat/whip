@@ -140,9 +140,54 @@ Drop `*.yaml` or `*.json` into `./evals/` (or pass `--evals dir`) and they're pi
 | `maxWords` | answer length budget |
 | `judge` | reserved for an LLM judge; off by default, never calls out |
 
-## Config (optional)
+## CLI reference
 
-`whip.config.ts` with a default export: `target`, `repeat`, `evals`, `only`, `variants: [{ system: "a.md" }, …]`. Flags win. See `examples/whip.config.ts`.
+Every command takes `--help` (`whip tune --help`). Anything that isn't a command name is a target, so `whip claude` is `whip run claude`.
+
+| command | does |
+|---|---|
+| `whip [run] <target>` | run the suite, print a scorecard; writes `.whip/runs/<id>.json` and `.whip/report.html` |
+| `whip compare <target> --variant k=v --variant k=v` | one run per variant, deltas vs the first; without `--variant` uses config `variants` |
+| `whip diff [runA] [runB]` | compare two saved runs (default `latest~1 latest`) |
+| `whip suggest [run]` | rule-based hints for a run's failures (default `latest`) |
+| `whip report [runs...]` | write `.whip/report.html` (default `latest`) |
+| `whip tune <target>` | propose, score and keep instruction edits (see Tuning) |
+| `whip clis` | print known CLI targets and `--tuner` presets |
+| `whip` | with `whip.config.ts`: run its `target`; without: print help |
+
+Run refs (`diff`, `suggest`, `report`): `latest`, `latest~N`, a run id in `.whip/runs/` (`.json` optional), or a path.
+
+**run / compare / tune flags**
+
+| flag | default | description |
+|---|---|---|
+| `-n`, `--repeat N` | 3 | attempts per task |
+| `--only <regex\|category>` | all | tasks whose id matches the regex or whose category equals the value |
+| `--evals <dir>` | `./evals` | extra tasks, added to the built-in suite |
+| `-v`, `--variant k=v` | | repeatable; a value that is an existing file is replaced by its contents; `k=v,k2=v2` sets several keys |
+| `--no-save` | off | don't write `.whip/runs/` or `.whip/report.html` (tune: write only `.whip/tuned.md`) |
+| `-h`, `--help` | | help for the command |
+
+**tune-only flags**
+
+| flag | default | description |
+|---|---|---|
+| `--tuner <preset\|cmd>` | library mode | `claude`, `copilot`, `codex`, `gemini`, `opencode`, `ollama:<model>`, `name:<model>`, or any command (`{prompt}` or stdin) |
+| `--target-file key[=file]` | `system` | variable the edits go to, optionally its starting file |
+| `--budget N` | 5 | max tuner calls (ignored in library mode) |
+| `--holdout F` | 0.3 | share of tasks held out (0 to 0.9) |
+| `--seed N` | 1 | split seed |
+| `-y`, `--yes` | off | skip the confirmation; required without a TTY |
+| `--write` | off | also overwrite the `--target-file` file |
+| `--timeout ms` | 300000 | per tuner call (CLI targets have a fixed 120 s timeout) |
+
+**Config.** Optional `whip.config.ts` in the current directory, default export: `target`, `repeat`, `evals`, `only` (all commands that run tasks) and `variants: [{ system: "a.md" }, …]` (`compare` only). Flags win. See `examples/whip.config.ts`.
+
+**Environment.** `NO_COLOR` disables colors. `WHIP_JUDGE`, when non-empty, makes `judge` checks fail instead of passing. CLI targets get `WHIP_<KEY>` for each variant key.
+
+**Exit codes.** `0` when the command finishes, whatever the score. `1` on any error, or when `whip tune` is declined or needs `--yes`.
+
+Full reference with examples: the site's [CLI reference](site/) page (`#/docs/cli`).
 
 ## Layout
 

@@ -9,26 +9,91 @@ import type { Run } from "./types";
 
 const HELP = `${bold("whip")} - evaluate agent harnesses, not models
 
-  whip <target>                    run the default suite, print a scorecard
+  whip [run] <target>              run the default suite, print a scorecard
   whip compare <target> --variant k=v --variant k=v   one change at a time, deltas vs first
-  whip diff <runA> <runB>          compare two saved runs (paths, ids, or "latest", "latest~1")
+  whip diff [runA] [runB]          compare two saved runs (paths, ids, or "latest", "latest~1")
   whip suggest [run]               rule-based hints for the failures in a run
   whip report [runs...]            write a static HTML report
   whip tune <target> [--tuner <cmd>] [--target-file system] [--budget N] [--holdout 0.3] [--yes] [--write]
                                    improve the instructions: greedy edits, kept only if train rises,
                                    no category drops >10 points and held-out tasks don't drop
   whip clis                        list known CLIs and how they are invoked
+  whip <command> --help            details for one command
 
   target: claude | codex | opencode | copilot | gemini | aider | goose | "ollama <model>"
           ./harness.ts (SDK: default-exported function) | "any-cmd --flag" (prompt on stdin, or {prompt})
-  flags:  -n/--repeat N (3)  --only <regex|category>  --variant key=value|key=file  --evals <dir> (./evals)
-          --timeout ms  --no-save     config: optional whip.config.ts (default export)
+  flags:  -n/--repeat N (3)  --only <regex|category>  -v/--variant key=value|key=file  --evals <dir> (./evals)
+          --no-save  -h/--help     config: optional whip.config.ts (default export)
   tune:   --tuner claude | copilot[:model] | codex | gemini | opencode | ollama:<model> | "any-cmd {prompt}"
             (default: no model, the \`whip suggest\` hint library). Must reply {"edits":[{op,line,target?,reason}]}
           --target-file key[=file] variant the edits go to (system → ctx.vars.system / $WHIP_SYSTEM);
             start file also via --variant system=prompt.md   --budget N tuner calls (5)
-          --holdout 0.3 --seed 1  seeded held-out split    --yes skip the confirm prompt (required without a TTY)
-          --write  also overwrite the prompt file (otherwise only .whip/tuned.md is written)`;
+          --holdout 0.3 --seed 1  seeded held-out split    -y/--yes skip the confirm prompt (required without a TTY)
+          --write  also overwrite the prompt file (otherwise only .whip/tuned.md is written)
+          --timeout ms  per tuner call (300000)
+  env:    NO_COLOR disables colors · WHIP_<KEY> is set for CLI targets from each variant key
+  exit:   0 done (whatever the score) · 1 error, or tune aborted / needs --yes`;
+
+const SUITE_FLAGS = `  -n, --repeat N          attempts per task (default 3, or config \`repeat\`)
+  --only <regex|category> keep tasks whose id matches the regex or whose category equals it (or config \`only\`)
+  --evals <dir>           extra task directory, added to the built-in suite (default ./evals, or config \`evals\`)
+  -v, --variant k=v       set a variable for the harness; repeatable. A value that is an existing file is
+                          replaced by its contents. "k=v,k2=v2" sets several keys in one variant
+  --no-save               don't write .whip/runs/<id>.json or .whip/report.html
+  -h, --help              this help`;
+
+/** `whip <command> --help`. Keys are subcommand names. */
+const CMD_HELP: Record<string, string> = {
+  run: `${bold("whip [run] <target>")} - run the suite against a harness, print a scorecard
+
+  <target>  claude | codex | opencode | copilot | gemini | aider | goose | "ollama <model>"
+            a single .ts/.js/.tsx/.jsx/.mts/.mjs path: SDK adapter (default-exported function)
+            anything else: a command; the prompt goes where {prompt} is, otherwise on stdin
+            optional when whip.config.ts sets \`target\`
+
+${SUITE_FLAGS}
+
+  Each --variant runs the suite once; with two or more, later runs print a diff vs the first.
+  Variants reach SDK harnesses as ctx.vars.<k>, CLIs as $WHIP_<K> and {k} placeholders.
+  Writes .whip/runs/<id>.json and .whip/report.html. Exit 0 whatever the score, 1 on error.`,
+  compare: `${bold("whip compare <target> --variant k=v --variant k=v")} - one change at a time, deltas vs the first
+
+  Runs the suite once per variant. The first is the baseline; each later one prints per-category
+  deltas and the tasks that changed ("flipped" = crossed 0% or 100%).
+  Without --variant, uses config \`variants\` (only compare reads them).
+
+${SUITE_FLAGS}`,
+  diff: `${bold("whip diff [runA] [runB]")} - compare two saved runs (default: latest~1 latest)
+
+  run refs: latest | latest~N (N runs before the latest) | a run id in .whip/runs (.json optional) | a path
+  Prints per-category deltas and the tasks that changed. Reads only; writes nothing.`,
+  suggest: `${bold("whip suggest [run]")} - rule-based hints for the failures in a run (default: latest)
+
+  Maps each attempt's first failure + task category to one instruction change, ranked by how many
+  tasks it would fix. No model involved. Run refs as in \`whip diff --help\`.`,
+  report: `${bold("whip report [runs...]")} - write a static HTML report to .whip/report.html
+
+  One column per run, in the order given (default: latest). Run refs as in \`whip diff --help\`.`,
+  clis: `${bold("whip clis")} - list known CLI targets and --tuner presets with the exact argv they run`,
+  tune: `${bold("whip tune <target>")} - improve the instructions: greedy edits, kept only if train rises,
+no category drops >10 points and held-out tasks don't drop
+
+  --tuner <cmd>             editor: claude | copilot[:model] | codex | gemini | opencode | ollama:<model>
+                            | name:<model> (adds --model) | "any-cmd {prompt}" (prompt on stdin without {prompt})
+                            default: no model, the \`whip suggest\` hint library. Must reply {"edits":[{op,line,target?,reason}]}
+  --target-file key[=file]  variant the edits go to (default system → ctx.vars.system / $WHIP_SYSTEM).
+                            Starting text: the file, else --variant key=..., else empty
+  --budget N                max tuner calls (default 5; library mode ignores it)
+  --holdout F               share of tasks held out, 0 to 0.9 (default 0.3)
+  --seed N                  seed for the held-out split (default 1)
+  -y, --yes                 skip the confirm prompt before tuner calls (required without a TTY)
+  --write                   also overwrite the --target-file file (otherwise only .whip/tuned.md)
+  --timeout ms              per tuner call (default 300000)
+  --no-save                 write only .whip/tuned.md (no tune-<id>.json, report or runs)
+  -n, --repeat N / --only / --evals / -v, --variant   as in \`whip run --help\` (config \`variants\` is not used)
+
+  Exit 1 when the confirm prompt is declined, or --tuner runs without a TTY and without --yes.`,
+};
 
 type Config = { target?: string; repeat?: number; variants?: Record<string, string>[]; evals?: string; only?: string };
 
@@ -76,7 +141,7 @@ async function main() {
   const [cmd0, ...rest] = process.argv.slice(2);
   const sub = ["compare", "diff", "suggest", "report", "clis", "run", "tune"].includes(cmd0) ? cmd0 : "run";
   const { pos, variants, o } = parseArgs(sub === "run" && cmd0 !== "run" ? [cmd0, ...rest].filter(Boolean) : rest);
-  if (o.help || (!cmd0 && !existsSync("whip.config.ts"))) return console.log(HELP);
+  if (o.help || (!cmd0 && !existsSync("whip.config.ts"))) return console.log((o.help && Object.hasOwn(CMD_HELP, cmd0 ?? "") && CMD_HELP[cmd0]) || HELP);
 
   if (sub === "clis") {
     const table = (t: Record<string, string[]>) => Object.entries(t).map(([k, v]) => `  ${k.padEnd(9)} ${v.join(" ")}`).join("\n");

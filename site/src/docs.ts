@@ -1,4 +1,5 @@
-export type Page = { slug: string; title: string; category: "Getting started" | "Adapters" | "Writing evals" | "Workflow" | "Reference"; summary: string; md: string };
+/** `wide`: drop the right-hand "On this page" rail so tables get the full width. */
+export type Page = { slug: string; title: string; category: "Getting started" | "Adapters" | "Writing evals" | "Workflow" | "Reference"; summary: string; md: string; wide?: boolean };
 
 const T = "```";
 export const PAGES: Page[] = [
@@ -102,7 +103,7 @@ Return a **string**, or \`{ text, toolCalls }\`. If you return plain text, Whip 
 | \`files\` | the seed files |
 | \`vars\` | your variant values, e.g. \`vars.system\` from \`--variant system=a.md\` |
 ` },
-  { slug: "cli", title: "CLI adapter", category: "Adapters", summary: "Zero lines: any command that reads a prompt and prints an answer.", md: `
+  { slug: "cli-adapter", title: "CLI adapter", category: "Adapters", summary: "Zero lines: any command that reads a prompt and prints an answer.", md: `
 ${T}sh
 whip claude
 whip "ollama qwen2.5:0.5b"
@@ -382,7 +383,212 @@ The "Be concise" hint lowered train and cost honesty 50 points, so it was reject
 | \`--seed\` | 1 | split seed |
 | \`--yes\` | | skip the confirmation |
 | \`--write\` | | also overwrite the prompt file |
+| \`--timeout ms\` | 300000 | per tuner call |
 | \`--no-save\` | | only write \`.whip/tuned.md\` |
+
+All flags, including the shared \`-n\`, \`--only\`, \`--evals\` and \`--variant\`: [CLI reference](#/docs/cli::whip-tune).
+` },
+  { slug: "cli", title: "CLI reference", category: "Reference", wide: true, summary: "Every command, flag, config key, env var and exit code.", md: `
+Generated from \`src/cli.ts\` and checked against \`whip --help\`. Every command also takes \`--help\` (\`whip tune --help\`).
+
+**Jump to:** [whip run](#/docs/cli::whip-run) · [whip compare](#/docs/cli::whip-compare) · [whip diff](#/docs/cli::whip-diff) · [whip suggest](#/docs/cli::whip-suggest) · [whip report](#/docs/cli::whip-report) · [whip tune](#/docs/cli::whip-tune) · [whip clis](#/docs/cli::whip-clis) · [Config](#/docs/cli::whip-config-ts) · [Env vars](#/docs/cli::environment-variables) · [Exit codes](#/docs/cli::exit-codes) · [Files](#/docs/cli::files-written)
+
+## Commands
+
+| command | does | reads | writes |
+|---|---|---|---|
+| \`whip [run] <target>\` | run the suite, print a scorecard | tasks | \`.whip/runs/<id>.json\`, \`.whip/report.html\` |
+| \`whip compare <target> --variant k=v ...\` | one run per variant, deltas vs the first | tasks | same as run, one file per variant |
+| \`whip diff [runA] [runB]\` | compare two saved runs | \`.whip/runs/\` | nothing |
+| \`whip suggest [run]\` | rule-based hints for a run's failures | \`.whip/runs/\` | nothing |
+| \`whip report [runs...]\` | static HTML report | \`.whip/runs/\` | \`.whip/report.html\` |
+| \`whip tune <target>\` | propose, score and keep instruction edits | tasks | \`.whip/tuned.md\`, \`tune-<id>.json\`, report, runs |
+| \`whip clis\` | print known CLI targets and tuner presets | | nothing |
+| \`whip\` | with \`whip.config.ts\`: run its \`target\`; without: print help | config | as run |
+
+Anything that is not a command name is a target, so \`whip claude\` is \`whip run claude\`. Flags may appear anywhere after the command.
+
+## Targets
+
+| target | adapter | how the prompt arrives |
+|---|---|---|
+| \`claude\`, \`codex\`, \`opencode\`, \`copilot\`, \`gemini\`, \`aider\`, \`goose\` | CLI | known invocation, see [whip clis](#/docs/cli::whip-clis) |
+| \`"ollama <model>"\` | CLI | \`ollama run <model> {prompt}\` |
+| a single \`.ts\`, \`.js\`, \`.tsx\`, \`.jsx\`, \`.mts\` or \`.mjs\` path, no spaces | SDK | \`(prompt, ctx)\` of the default export |
+| any other command, e.g. \`"my-agent --fast"\` | CLI | where \`{prompt}\` appears, otherwise on stdin |
+
+Each attempt runs in a fresh temp directory. Arguments after the command name that are existing relative paths are made absolute first. CLI targets are killed after 120 s per call; this is fixed and not affected by \`--timeout\`. SDK harnesses have no timeout.
+
+## whip run
+
+${T}sh
+whip examples/mock-tiny.ts
+whip run claude -n 5 --only format
+whip "ollama qwen2.5:0.5b" --variant system=prompts/a.md --no-save
+${T}
+
+| flag | type | default | description | example |
+|---|---|---|---|---|
+| \`<target>\` | positional | config \`target\` | the harness to score; required unless the config sets it | \`whip ./my-harness.ts\` |
+| \`-n\`, \`--repeat\` | number | 3, or config \`repeat\` | attempts per task | \`-n 10\` |
+| \`--only\` | regex or category | config \`only\` | keep tasks whose id matches the regex or whose category equals the value; no match runs 0 tasks | \`--only "^tool-"\`, \`--only honesty\` |
+| \`--evals\` | dir | \`./evals\`, or config \`evals\` | extra tasks (\`*.yaml\`, \`*.yml\`, \`*.json\`), added to the built-in suite; a missing dir is skipped | \`--evals tests/evals\` |
+| \`-v\`, \`--variant\` | \`k=v\`, repeatable | none | set a variable; a value that is an existing file is replaced by its contents; \`k=v,k2=v2\` sets several keys at once | \`--variant system=prompts/a.md\` |
+| \`--no-save\` | boolean | off | don't write \`.whip/runs/<id>.json\` or \`.whip/report.html\` | \`--no-save\` |
+| \`-h\`, \`--help\` | boolean | off | print help for the command | \`whip run --help\` |
+
+Variants reach SDK harnesses as \`ctx.vars.<k>\` and CLIs as the env var \`$WHIP_<K>\` (key upper-cased) and the \`{k}\` placeholder. With two or more \`--variant\` flags, \`whip run\` behaves like \`whip compare\`.
+
+## whip compare
+
+${T}sh
+whip compare ./my-harness.ts --variant system=prompts/a.md --variant system=prompts/b.md
+whip compare                     # target and variants from whip.config.ts
+${T}
+
+Runs the suite once per variant. The first variant is the baseline; each later one prints per-category deltas and the tasks that changed, with **flipped** marking tasks that crossed 0% or 100%. Without \`--variant\`, it uses config \`variants\`, which no other command reads. Flags are the same as [whip run](#/docs/cli::whip-run).
+
+## whip diff
+
+${T}sh
+whip diff                        # latest~1 vs latest
+whip diff latest~3 latest
+whip diff .whip/runs/2026-10-15T13-04-16-045Z.json latest
+${T}
+
+| argument | default | description |
+|---|---|---|
+| \`runA\` | \`latest~1\` | baseline run |
+| \`runB\` | \`latest\` | run to compare |
+
+### Run refs
+
+\`diff\`, \`suggest\` and \`report\` take the same refs:
+
+| ref | resolves to |
+|---|---|
+| \`latest\` | newest file in \`.whip/runs/\` (sorted by name, which is the timestamp id) |
+| \`latest~N\` | N runs before the newest |
+| \`<id>\` or \`<id>.json\` | \`.whip/runs/<id>.json\` |
+| a path | that file, if it exists |
+
+A ref that resolves to nothing (or no saved runs) exits 1.
+
+## whip suggest
+
+${T}sh
+whip suggest
+whip suggest latest~2
+${T}
+
+| argument | default | description |
+|---|---|---|
+| \`run\` | \`latest\` | the run to analyze |
+
+Maps each attempt's first failure and the task category to one instruction change, ranked by how many tasks it would fix. No model is called. See [Suggest](#/docs/suggest).
+
+## whip report
+
+${T}sh
+whip report
+whip report latest~1 latest
+${T}
+
+| argument | default | description |
+|---|---|---|
+| \`runs...\` | \`latest\` | one column per run, in the order given |
+
+Always writes \`.whip/report.html\` and prints its absolute path. \`whip run\`, \`compare\` and \`tune\` also overwrite this file unless \`--no-save\` is set.
+
+## whip tune
+
+${T}sh
+whip tune examples/mock-tiny.ts                                   # library mode, no model
+whip tune ./my-harness.ts --target-file system=prompts/a.md --tuner claude --yes
+whip tune "ollama run qwen2.5:1.5b" --target-file system=prompts/agent.md --tuner ollama:qwen2.5:14b --budget 3 --write
+${T}
+
+| flag | type | default | description | example |
+|---|---|---|---|---|
+| \`<target>\` | positional | config \`target\` | the harness being scored | \`whip tune ./h.ts\` |
+| \`--tuner\` | preset or command | library mode | the editor; presets \`claude\`, \`copilot\`, \`codex\`, \`gemini\`, \`opencode\`, \`ollama:<model>\` (default \`qwen2.5:14b\`), \`name:<model>\` adds \`--model <model>\`; any other command gets the prompt at \`{prompt}\` or on stdin | \`--tuner "claude -p {prompt}"\` |
+| \`--target-file\` | \`key[=file]\` | \`system\` | the variable the edits go to; the starting text is the file, else \`--variant key=...\`, else empty; a value that is not an existing file is used as literal text | \`--target-file system=prompts/a.md\` |
+| \`--budget\` | number | 5 | max tuner calls; ignored in library mode | \`--budget 2\` |
+| \`--holdout\` | fraction | 0.3 | share of tasks held out, clamped to 0..0.9; \`0\` disables the held-out check | \`--holdout 0.2\` |
+| \`--seed\` | number | 1 | seed for the stratified held-out split | \`--seed 7\` |
+| \`-y\`, \`--yes\` | boolean | off | skip the confirmation before tuner calls; required without a TTY | \`--yes\` |
+| \`--write\` | boolean | off | also overwrite the \`--target-file\` file; without a file it only prints a note | \`--write\` |
+| \`--timeout\` | ms | 300000 | timeout per tuner call | \`--timeout 600000\` |
+| \`--no-save\` | boolean | off | write only \`.whip/tuned.md\` | \`--no-save\` |
+| \`-n\`, \`--only\`, \`--evals\`, \`-v\` | | | as in [whip run](#/docs/cli::whip-run); config \`variants\` is not used | \`-n 5\` |
+
+The tuner must reply \`{"edits":[{"op":"add","line":"...","reason":"..."}]}\` (ops \`add\`, \`replace\` with \`target\`, \`remove\`). How the loop decides is in [Tuning](#/docs/tuning).
+
+## whip clis
+
+${T}sh
+whip clis
+${T}
+
+Prints the exact argv for each known target and each \`--tuner\` preset. \`{prompt}\` is the prompt as one argument; \`{model}\` is the model from \`"ollama <model>"\` or \`ollama:<model>\`.
+
+## whip.config.ts
+
+Optional, read from the current directory only. Its default export may set:
+
+| key | type | flag equivalent | used by |
+|---|---|---|---|
+| \`target\` | string | \`<target>\` | run, compare, tune |
+| \`repeat\` | number | \`-n\`, \`--repeat\` | run, compare, tune |
+| \`evals\` | string | \`--evals\` | run, compare, tune |
+| \`only\` | string | \`--only\` | run, compare, tune |
+| \`variants\` | \`Record<string, string>[]\` | \`--variant\` (repeated) | compare only |
+
+Flags win over config. With a config file present, a bare \`whip\` runs instead of printing help.
+
+${T}ts
+export default {
+  target: "./my-harness.ts",
+  repeat: 3,
+  evals: "./evals",
+  only: "format",
+  variants: [{ system: "prompts/baseline.md" }, { system: "prompts/tuned.md" }],
+};
+${T}
+
+## Environment variables
+
+| variable | direction | effect |
+|---|---|---|
+| \`NO_COLOR\` | read | any non-empty value disables ANSI colors; colors are also off when stdout is not a TTY |
+| \`WHIP_JUDGE\` | read | when non-empty, \`judge\` checks fail with \`judge: not implemented offline\`; unset, they pass without calling anything |
+| \`WHIP_<KEY>\` | set for CLI targets | one per variant key, e.g. \`--variant system=a.md\` sets \`$WHIP_SYSTEM\` to the file's contents |
+
+CLI targets inherit the rest of your environment. Tuner commands inherit it unchanged.
+
+## Exit codes
+
+| code | when |
+|---|---|
+| \`0\` | the command finished, whatever the score; also \`--help\`, and bare \`whip\` without a config |
+| \`1\` | any error: no target, \`run not found\`, a harness file without a default export, a bad task file, ... |
+| \`1\` | \`whip tune\`: the confirmation was declined, or \`--tuner\` ran without a TTY and without \`--yes\` |
+
+A low score never changes the exit code. To gate CI on a score, read \`score\` from \`.whip/runs/<id>.json\`.
+
+## Files written
+
+| path | written by |
+|---|---|
+| \`.whip/runs/<id>.json\` | run, compare (one per variant), tune (baseline and final) |
+| \`.whip/report.html\` | run, compare, report, tune |
+| \`.whip/tuned.md\` | tune, always |
+| \`.whip/tune-<id>.json\` | tune |
+
+## Parsing notes
+
+- Any \`--name\` that isn't listed above takes the next argument as its value and is otherwise ignored, so a typo like \`--repat 5 claude\` swallows the target.
+- \`--variant\` splits on commas, so a literal value containing \`,\` is cut short. Put such text in a file.
 ` },
   { slug: "config", title: "Config and flags", category: "Reference", summary: "Optional whip.config.ts and every flag.", md: `
 Zero config is the default. For repeat runs, add \`whip.config.ts\`:
@@ -402,13 +608,13 @@ ${T}
 |---|---|---|
 | \`-n, --repeat\` | 3 | attempts per task |
 | \`--only\` | | regex on task id, or a category name |
-| \`--variant k=v\` | | repeatable; file paths are read |
+| \`-v, --variant k=v\` | | repeatable; file paths are read |
 | \`--evals\` | ./evals | extra task directory |
-| \`--no-save\` | | don't write .whip/ |
+| \`--no-save\` | | don't write .whip/runs or .whip/report.html |
 
 ## Commands
 
-\`whip <target>\`, \`whip compare\`, \`whip diff\`, \`whip suggest\`, \`whip report\`, \`whip clis\`.
+\`whip <target>\`, \`whip compare\`, \`whip diff\`, \`whip suggest\`, \`whip report\`, \`whip tune\`, \`whip clis\`. Every flag, env var and exit code is in the [CLI reference](#/docs/cli).
 ` },
   { slug: "faq", title: "FAQ", category: "Reference", summary: "Privacy, costs and why there's no LLM judge.", md: `
 ## Does Whip send data anywhere?

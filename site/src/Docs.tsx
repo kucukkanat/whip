@@ -22,7 +22,7 @@ export default function Docs({ slug, hash }: { slug: string; hash: string }) {
   }, [page.slug]);
 
   return (
-    <div className="grid min-h-[calc(100vh-4rem)] grid-cols-1 md:grid-cols-[260px_1fr] xl:grid-cols-[280px_1fr_260px]">
+    <div className={`grid min-h-[calc(100vh-4rem)] grid-cols-1 md:grid-cols-[260px_1fr] ${page.wide ? "xl:grid-cols-[280px_1fr]" : "xl:grid-cols-[280px_1fr_260px]"}`}>
       <aside className="border-b border-zinc-200 p-4 md:sticky md:top-16 md:h-[calc(100vh-4rem)] md:overflow-y-auto md:border-r md:border-b-0 dark:border-zinc-800" aria-label="Docs navigation">
         <div className="mb-4 flex flex-wrap gap-1.5" role="group" aria-label="Filter sections">
           {["All", ...CATS].map((c) => <button key={c} onClick={() => setFilter(c)} aria-pressed={filter === c}
@@ -50,7 +50,7 @@ export default function Docs({ slug, hash }: { slug: string; hash: string }) {
           {next && <a href={`#/docs/${next.slug}`} className="rounded-xl border border-zinc-200 p-4 text-right hover:border-lime dark:border-zinc-800"><div className="text-xs text-zinc-500">Next →</div><div className="font-medium">{next.title}</div></a>}
         </nav>
       </main>
-      <aside className="hidden border-l border-zinc-200 p-6 xl:block xl:sticky xl:top-16 xl:h-[calc(100vh-4rem)] xl:overflow-y-auto dark:border-zinc-800" aria-label="On this page">
+      {!page.wide && <aside className="hidden border-l border-zinc-200 p-6 xl:block xl:sticky xl:top-16 xl:h-[calc(100vh-4rem)] xl:overflow-y-auto dark:border-zinc-800" aria-label="On this page">
         <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">On this page</h2>
         <ul className="space-y-1 border-l border-zinc-200 text-sm dark:border-zinc-800">
           {toc.map((h) => { const id = slugify(h.t); return (
@@ -60,7 +60,7 @@ export default function Docs({ slug, hash }: { slug: string; hash: string }) {
           <div className="font-medium">Try it offline</div>
           <code className="mt-2 block font-mono text-xs text-zinc-500">whip examples/mock-tiny.ts</code>
         </div>
-      </aside>
+      </aside>}
     </div>
   );
 }
