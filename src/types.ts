@@ -4,9 +4,13 @@ export type HarnessInput = { prompt: string; tools?: ToolSpec[]; files?: Record<
 export type HarnessOutput = { text: string; toolCalls?: ToolCall[]; exitCode?: number; ms: number };
 export type Harness = (input: HarnessInput) => Promise<HarnessOutput>;
 
-/** What a user's SDK function may return. */
-export type SdkResult = string | { text?: string; toolCalls?: ToolCall[] };
-export type SdkFn = (prompt: string, ctx: HarnessInput) => SdkResult | Promise<SdkResult>;
+/** What your harness gets besides the prompt. `vars` holds the `-v key=value` variables, e.g. `ctx.vars.system`. */
+export type HarnessContext<K extends string = string> = {
+  cwd: string; tools?: ToolSpec[]; files?: Record<string, string>; vars: Partial<Record<K, string>>;
+};
+/** What your harness returns: the answer, or the answer plus the tool calls it made. */
+export type HarnessResult = string | { text?: string; toolCalls?: ToolCall[] };
+export type SdkFn = (prompt: string, ctx: HarnessContext) => HarnessResult | Promise<HarnessResult>;
 
 export type Check =
   | { contains: string } | { notContains: string }

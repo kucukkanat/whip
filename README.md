@@ -1,116 +1,145 @@
 # Whip
 
-**Evaluate the harness, not the model.** Whip runs a fixed suite of small, deterministic tasks through your agent harness (system prompt, tool definitions, scaffolding) and tells you exactly which instruction gaps make tiny models fail. Change one thing, re-run, watch the number move.
-
-- **Zero config.** `whip <target>` detects the harness type, runs the suite, prints a scorecard.
-- **Thin wrapper.** One engine, two adapters. 0 lines to plug in a CLI, ~5 for an SDK.
-- **Scored on success, not vibes.** Regex, JSON schema, tool name and args, files on disk, exit codes.
-- **Local and offline.** No telemetry, no network calls of its own. Results stay in `.whip/`.
-
-## 30-second quickstart
+**Score your agent's harness, then improve its prompt.** Whip runs a fixed suite of small, deterministic tasks through your agent (system prompt, tools, scaffolding) and shows which instructions are missing. Tiny models benefit most.
 
 ```sh
-bun install && bun link                                # makes `whip` available (local only)
-whip examples/mock-tiny.ts                             # scorecard for an offline fake tiny model
-whip compare examples/mock-tiny.ts --variant system=examples/prompts/baseline.md --variant system=examples/prompts/tuned.md
+whip <target>                                   # run the tasks, print a scorecard and hints
+whip <target> -v system=@a.md -v system=@b.md   # compare two prompts
+whip tune <target> prompts/a.md                 # let whip improve the prompt for you
+whip diff                                       # compare the last two saved runs
 ```
 
-Without linking, use `bun src/cli.ts` instead of `whip`.
+That's the whole CLI. `whip <command> --help` has the details. When you make a mistake, whip tells you what to type instead.
 
-## Plug in a CLI (0 lines)
+## Quickstart
 
 ```sh
-whip claude            # claude -p … --output-format stream-json
-whip codex             # codex exec --json --sandbox workspace-write …
-whip opencode          # opencode run --format json …
-whip copilot           # copilot -p … --allow-all-tools --output-format json
-whip "ollama qwen2.5:0.5b"
-whip "my-agent --fast"             # anything else: prompt on stdin, answer on stdout
-whip "hermes chat -q {prompt}"     # or put {prompt} where the prompt goes
+bun install && bun link                 # makes `whip` available (or use `bun src/cli.ts`)
+whip examples/mock-tiny.ts              # scorecard for an offline fake tiny model
+whip tune examples/mock-tiny.ts examples/prompts/baseline.md   # watch it go from ~29% to 100%
 ```
 
-Each task runs in a fresh temp directory seeded with the task's files, so edits a coding CLI makes are checked on disk. Variants reach CLIs as env vars (`--variant system=a.md` → `$WHIP_SYSTEM`) and as `{system}` placeholders. `whip clis` prints the table.
+## 1. Pick a target
 
-| name | invocation | notes |
+The target is the agent being scored. Three kinds:
+
+| target | example | how whip talks to it |
 |---|---|---|
-| claude | `claude -p {prompt} --output-format stream-json --verbose --allowedTools Read,Edit,Write,Bash` | tool_use events parsed |
-| codex | `codex exec --json --skip-git-repo-check --sandbox workspace-write {prompt}` | JSONL items parsed |
-| opencode | `opencode run --format json {prompt}` | JSONL |
-| copilot | `copilot -p {prompt} --allow-all-tools --output-format json` | JSONL |
-| gemini | `gemini -p {prompt} --output-format json --yolo` | |
-| aider | `aider --message {prompt} --yes-always --no-git` | text + files |
-| goose | `goose run -t {prompt}` | text + files |
-| ollama | `ollama run <model> {prompt}` | raw tiny model, text tool protocol |
+| a built-in CLI | `whip claude` | runs it non-interactively (`whip run --help` shows the exact command) |
+| your code | `whip ./my-harness.ts` | calls its default export |
+| any command | `whip "my-agent --fast {prompt}"` | prompt at `{prompt}`, otherwise on stdin; answer on stdout |
 
-## Plug in an SDK harness (~5 lines)
+Built-ins: `claude`, `codex`, `opencode`, `copilot`, `gemini`, `aider`, `goose`, `"ollama <model>"`.
+
+**Your code** is one default-exported function. `defineHarness` is optional and only adds types:
 
 ```ts
 // my-harness.ts
-import { defineHarness } from "whip"; // optional helper; a plain default export works too
-import { runAgent } from "./agent";
+import { defineHarness } from "whip";
 
-export default defineHarness(async (prompt, ctx) => runAgent({ system: ctx.vars.system, prompt, cwd: ctx.cwd }));
+export default defineHarness(async (prompt, ctx) => {
+  return myModel({ system: ctx.vars.system, prompt, cwd: ctx.cwd }); // return a string
+});
 ```
+
+Return a string, or `{ text, toolCalls: [{ name, args }] }` if you track tool calls yourself. `ctx` has `vars` (your variables), `cwd` (a fresh sandbox directory), `tools` and `files`. To type your variables: `defineHarness<"system" | "tools">(...)`. For a real local model, see [examples/ollama.ts](examples/ollama.ts).
+
+## 2. Pass it a prompt
+
+A **variable** is any named text your harness reads, usually the system prompt. Set it with `-v`:
 
 ```sh
-whip ./my-harness.ts
+whip ./my-harness.ts -v system=@prompts/a.md     # @ reads a file
+whip ./my-harness.ts -v system="Be brief."       # or give the text
 ```
 
-Return a string, or `{ text, toolCalls: [{ name, args }] }`. `ctx` has `cwd`, `tools`, `files` and `vars` (your variants).
+| your target | reads `-v system=…` as |
+|---|---|
+| `.ts` / `.js` harness | `ctx.vars.system` |
+| a command | `$WHIP_SYSTEM`, or `{system}` placed in the command |
+| a built-in CLI | not at all: wrap it, e.g. `"claude -p {prompt} --append-system-prompt {system}"` |
 
-### How tools work
+Whip warns when a variable never reaches the agent, for example when a harness never reads `ctx.vars.system`.
 
-Tasks declare simulated tools. Whip describes them in the prompt with a one-line text protocol: `TOOL <name> {"arg":"value"}`. When a harness calls a tool (through returned `toolCalls`, JSONL events or `TOOL` lines), Whip answers with the simulated result and calls the harness again, for up to 4 turns. That lets the same task test tool choice, arguments and error recovery on any harness, including a bare `ollama run`.
+## 3. Compare prompts
 
-## Compare variants: the feedback loop
+Give the same variable two values and whip runs once per value, then prints what changed:
 
 ```sh
-whip compare ./my-harness.ts --variant system=prompts/a.md --variant system=prompts/b.md
-whip diff latest~1 latest      # any two saved runs (ids, paths, latest, latest~N)
-whip suggest                   # rule-based hints from the latest failures, no model needed
-whip report latest~1 latest    # static HTML at .whip/report.html
-whip tune ./my-harness.ts      # let Whip propose, score and keep prompt edits (see Tuning)
+whip ./my-harness.ts -v system=@prompts/a.md -v system=@prompts/b.md
 ```
 
-The first variant is the baseline. Whip prints deltas per category and per task and marks tasks that **flipped**. Change one element per variant so the delta has one cause.
+```
+Whip diff  baseline 29% → prompts/b.md 100%  +71
+  format                  33% → 100%  +67
+  recovery                 0% → 100%  +100
+  ▲ format-json              0% → 100%  flipped
+```
 
-## Tuning: let Whip edit the prompt
+The first value is the baseline. Only one variable may vary per comparison, so every change has one cause. Variables given once (e.g. `-v tools=@tools.md`) apply to every run.
+
+Every run is saved to `.whip/runs/`. Compare any two later with `whip diff` (default: the last two), e.g. `whip diff latest~3 latest`. Add `--html` for a report.
+
+## 4. Let whip tune the prompt
 
 ```sh
-whip tune examples/mock-tiny.ts                                      # library mode: no model, ~29% → 100%
-whip tune examples/mock-tiny.ts --tuner "bun examples/mock-tuner.ts" --yes   # offline mock editor
-whip tune ./my-harness.ts --target-file system=prompts/a.md \
-  --tuner "copilot --model <claude-opus-id> -p {prompt}"             # a real model as editor
-whip tune ./my-harness.ts --target-file system=prompts/a.md --tuner copilot:<claude-opus-id>   # same via preset
+whip tune ./my-harness.ts prompts/a.md                  # offline: whip's built-in hints
+whip tune ./my-harness.ts prompts/a.md --tuner claude   # a model proposes the edits
+whip tune ./my-harness.ts prompts/a.md --write          # also save the result into prompts/a.md
 ```
 
-`whip tune` runs the compare loop for you, one edit at a time:
+Whip edits the prompt one line at a time and keeps an edit only when:
 
-1. **Split.** A seeded split (`--seed 1`) holds out `--holdout 0.3` of the suite. Held-out tasks are spread across categories and never shown to the proposer. Baseline is scored on both halves with the usual `-n` repeats.
-2. **Propose.** By default the proposer is the `whip suggest` hint library: each failure type maps to drop-in instruction lines. With `--tuner <cmd>`, any CLI becomes the editor. It gets the current instructions plus the failed train tasks (prompt, actual output, broken check) and must reply `{"edits":[{"op":"add"|"replace"|"remove","line":"…","target":"…","reason":"…"}]}`. Code fences, surrounding prose, a bare edit object or trailing junk are all fine.
-3. **Score and keep.** Each edit is scored against the current instructions and **kept only if** train rises, no category drops more than 10 points, and the held-out score doesn't drop. Kept edits stack. A drop only counts if it is bigger than measurement noise (two standard errors from tasks that pass only sometimes; zero when every task always passes or always fails). When noise could have decided a verdict, or a rejection would throw away a train gain, both sides are re-scored once and the verdict uses the pooled attempts.
-4. **Stop and prune.** Tuning stops when all train tasks pass, at a plateau, or when `--budget` tuner calls (default 5) are spent. A last pass removes every line whose removal costs nothing.
+- the score goes up,
+- no category drops more than 10 points, and
+- a set of held-out tasks (never shown to the tuner) doesn't get worse.
+
+Then it removes any line that isn't pulling its weight. The result goes to `.whip/tuned.md`. Your file is only changed with `--write`.
 
 ```
-✓ +If the information is not in the prompt or …   17 → 33   kept (library)
+✓ +If the information is not in the prompt or …   17 → 33   kept
 ✗ +Be concise: answer directly and skip caveat…   47 → 42   rejected (honesty −50)
-✓ +If a tool returns ERROR, read it, then retr…   58 → 67   kept (library)
+✓ +If a tool returns ERROR, read it, then retr…   58 → 67   kept
 ```
 
-Results: `.whip/tuned.md` (the new instructions), `.whip/tune-<id>.json` (every step, plus a changelog of which line fixed which tasks), a tune section in `.whip/report.html`, and the baseline and final runs in `.whip/runs/`. Your prompt file is only overwritten with `--write`. `--no-save` writes only `tuned.md`.
+- **`--tuner`** picks who proposes edits. Presets: `claude`, `copilot`, `codex`, `gemini`, `opencode`, `ollama:<model>`; `name:<model>` adds `--model`. Any command works too: it gets the prompt at `{prompt}` or on stdin and replies `{"edits":[{"op":"add","line":"..."}]}`. See `whip tune --help`.
+- **Cost.** Whip asks before calling a tuner and shows an estimate. `--yes` skips the question (required in CI). `--budget N` caps tuner calls (default 5).
+- **Privacy.** A tuner sees the failing tasks' prompts and your agent's answers. Without `--tuner`, nothing leaves your machine.
+- **Another variable.** `--key tools` tunes `ctx.vars.tools` instead of `system`.
 
-- **Target vs tuner.** The target is the harness being scored. The tuner only edits text. Edits reach the target through the normal variant mechanism: `--target-file system` (default) means `ctx.vars.system` / `$WHIP_SYSTEM`. Start from a file with `--target-file system=prompts/a.md` or `--variant system=prompts/a.md`.
-- **Tuner presets** (`whip clis`): `claude`, `copilot`, `codex`, `gemini`, `opencode`, `ollama:<model>`, and `name:<model>` for a `--model` flag. They run in a throwaway directory with tools off where the CLI allows it. Copilot always gets `--silent --no-color --no-ask-user --disable-builtin-mcps --deny-tool=shell --deny-tool=write`, even in a custom command. Anything else works too: `--tuner "claude -p {prompt}"`, `--tuner "copilot --model <claude-opus-id> -p {prompt}"`, `--tuner "ollama run qwen2.5:14b"` (prompt on stdin without `{prompt}`).
-- **Confirmation.** Before the first tuner call Whip prints the estimated tuner and target calls and asks to continue. `--yes` skips the question. Without a TTY, `--yes` is required, otherwise it exits non-zero without calling anything. Library mode never calls a model and doesn't ask.
-- **When the library runs out.** If failures remain after library mode, the summary suggests `--tuner`.
+## Flags
 
-## Default suite
+| flag | default | for |
+|---|---|---|
+| `-v key=value` / `key=@file` | | a variable for your harness; repeat a key to compare values |
+| `-n N` | 3 | attempts per task |
+| `--only <regex\|category>` | all | run some tasks, e.g. `--only format` |
+| `--evals <dir>` | `./evals` | your own tasks, added to the built-in ones |
+| `--no-save` | | write nothing to `.whip/` |
+| `--tuner`, `--key`, `--budget`, `--write`, `--yes` | | `whip tune` only |
+| `--html` | | `whip diff` only |
 
-17 tasks in `tasks/*.yaml` across tool-selection, arguments, format, multi-step, recovery, instruction-following, honesty and concision. Each runs 3 times (`-n`), and the scorecard shows pass rate and mean latency.
+**Config (optional).** `whip.config.ts` sets defaults, so a bare `whip` works. Flags win. Example: [examples/whip.config.ts](examples/whip.config.ts).
 
-## Task file format
+```ts
+export default {
+  target: "./my-harness.ts",
+  variants: [{ system: "@prompts/a.md" }, { system: "@prompts/b.md" }], // used when no -v is given
+  tune: { tuner: "claude", budget: 5, holdout: 0.3, seed: 1, timeout: 300000 },
+};
+```
 
-Drop `*.yaml` or `*.json` into `./evals/` (or pass `--evals dir`) and they're picked up automatically.
+**Exit codes.** `0` when the command finishes, whatever the score. `1` on any error.
+
+## The default suite
+
+17 tasks in `tasks/*.yaml`: tool-selection, arguments, format, multi-step, recovery, instruction-following, honesty and concision. Each runs 3 times, so you get pass rates instead of coin flips. Each attempt runs in a fresh temp directory, so files a coding agent edits are checked on disk.
+
+**Tools are simulated.** Tasks declare tools; whip describes them in the prompt with a one-line protocol (`TOOL <name> {"arg":"value"}`), answers calls with the simulated result and calls your harness again, up to 4 turns. Tool calls are also read from JSON event streams (Claude Code, Codex, OpenCode, Copilot) and from `toolCalls` you return.
+
+## Writing your own tasks
+
+Drop `*.yaml` or `*.json` files into `./evals/`. They're picked up automatically.
 
 ```yaml
 - id: store-hours
@@ -138,69 +167,21 @@ Drop `*.yaml` or `*.json` into `./evals/` (or pass `--evals dir`) and they're pi
 | `file, exists, contains` | sandbox file state after the run |
 | `exitCode` | process exit code (otherwise non-zero always fails) |
 | `maxWords` | answer length budget |
-| `judge` | reserved for an LLM judge; off by default, never calls out |
-
-## CLI reference
-
-Every command takes `--help` (`whip tune --help`). Anything that isn't a command name is a target, so `whip claude` is `whip run claude`.
-
-| command | does |
-|---|---|
-| `whip [run] <target>` | run the suite, print a scorecard; writes `.whip/runs/<id>.json` and `.whip/report.html` |
-| `whip compare <target> --variant k=v --variant k=v` | one run per variant, deltas vs the first; without `--variant` uses config `variants` |
-| `whip diff [runA] [runB]` | compare two saved runs (default `latest~1 latest`) |
-| `whip suggest [run]` | rule-based hints for a run's failures (default `latest`) |
-| `whip report [runs...]` | write `.whip/report.html` (default `latest`) |
-| `whip tune <target>` | propose, score and keep instruction edits (see Tuning) |
-| `whip clis` | print known CLI targets and `--tuner` presets |
-| `whip` | with `whip.config.ts`: run its `target`; without: print help |
-
-Run refs (`diff`, `suggest`, `report`): `latest`, `latest~N`, a run id in `.whip/runs/` (`.json` optional), or a path.
-
-**run / compare / tune flags**
-
-| flag | default | description |
-|---|---|---|
-| `-n`, `--repeat N` | 3 | attempts per task |
-| `--only <regex\|category>` | all | tasks whose id matches the regex or whose category equals the value |
-| `--evals <dir>` | `./evals` | extra tasks, added to the built-in suite |
-| `-v`, `--variant k=v` | | repeatable; a value that is an existing file is replaced by its contents; `k=v,k2=v2` sets several keys |
-| `--no-save` | off | don't write `.whip/runs/` or `.whip/report.html` (tune: write only `.whip/tuned.md`) |
-| `-h`, `--help` | | help for the command |
-
-**tune-only flags**
-
-| flag | default | description |
-|---|---|---|
-| `--tuner <preset\|cmd>` | library mode | `claude`, `copilot`, `codex`, `gemini`, `opencode`, `ollama:<model>`, `name:<model>`, or any command (`{prompt}` or stdin) |
-| `--target-file key[=file]` | `system` | variable the edits go to, optionally its starting file |
-| `--budget N` | 5 | max tuner calls (ignored in library mode) |
-| `--holdout F` | 0.3 | share of tasks held out (0 to 0.9) |
-| `--seed N` | 1 | split seed |
-| `-y`, `--yes` | off | skip the confirmation; required without a TTY |
-| `--write` | off | also overwrite the `--target-file` file |
-| `--timeout ms` | 300000 | per tuner call (CLI targets have a fixed 120 s timeout) |
-
-**Config.** Optional `whip.config.ts` in the current directory, default export: `target`, `repeat`, `evals`, `only` (all commands that run tasks) and `variants: [{ system: "a.md" }, …]` (`compare` only). Flags win. See `examples/whip.config.ts`.
-
-**Environment.** `NO_COLOR` disables colors. `WHIP_JUDGE`, when non-empty, makes `judge` checks fail instead of passing. CLI targets get `WHIP_<KEY>` for each variant key.
-
-**Exit codes.** `0` when the command finishes, whatever the score. `1` on any error, or when `whip tune` is declined or needs `--yes`.
-
-Full reference with examples: the site's [CLI reference](site/) page (`#/docs/cli`).
+| `judge` | reserved for an LLM judge; off, never calls out |
 
 ## Layout
 
 ```
-src/cli.ts       commands and flags
-src/adapters.ts  SDK + CLI adapters, known CLI table, tool-call parsing
+src/cli.ts       commands
+src/args.ts      flag parsing, validation and "did you mean" messages
+src/adapters.ts  SDK + CLI adapters, built-in CLI table, tool-call parsing
 src/engine.ts    task loading, sandbox, tool loop, repeats
 src/checks.ts    structured checks
-src/report.ts    scorecard, diff, suggest (+ the hint library), HTML
+src/report.ts    scorecard, diff, hints, HTML
 src/tune.ts      whip tune: split, proposers, keep rules, greedy loop, prune
 tasks/           default suite
-examples/        offline fake tiny model (SDK and CLI), mock tuner, prompt variants, custom eval
+examples/        offline fake tiny model (SDK and CLI), Ollama harness, mock tuner, prompts, custom eval
 site/            landing page + docs (Vite, React, Tailwind)
 ```
 
-`bun test` runs the unit tests.
+`bun test` runs the unit tests. Whip makes no network calls of its own and keeps results in `.whip/`.

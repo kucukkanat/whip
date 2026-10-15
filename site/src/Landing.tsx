@@ -15,7 +15,7 @@ const LINES = [
   { t: "  ✗ tool-weather       0%  tool: expected get_weather, got search_web", c: "text-rose-400" },
   { t: "  ✓ edit-config      100%", c: "text-lime" },
   { t: "" },
-  { t: "  score  29%  · next: whip suggest", c: "font-semibold text-amber-300" },
+  { t: "  score  29%  · hints below · next: whip tune", c: "font-semibold text-amber-300" },
 ];
 
 function Terminal() {
@@ -84,8 +84,8 @@ function Diagram() {
       <div className="text-center text-2xl text-zinc-400" aria-hidden><span className="lg:hidden">↓</span><span className="hidden lg:inline">→</span></div>
       <div className="grid gap-4">
         <div className={box}><div className="font-medium">Scorecard</div><p className="text-sm text-zinc-500">terminal · JSON · HTML</p></div>
-        <div className={box}><div className="font-medium">compare / diff</div><p className="text-sm text-zinc-500">deltas, flipped tasks</p></div>
-        <div className={box}><div className="font-medium">suggest</div><p className="text-sm text-zinc-500">which instruction to change</p></div>
+        <div className={box}><div className="font-medium">compare · diff</div><p className="text-sm text-zinc-500">deltas, flipped tasks</p></div>
+        <div className={box}><div className="font-medium">hints · tune</div><p className="text-sm text-zinc-500">which instruction to change, applied for you</p></div>
       </div>
     </div>
   );
@@ -134,7 +134,7 @@ function TuneLog() {
 }
 
 const FEATURES = [
-  ["Zero config", "whip <target> detects the harness, runs the suite and prints a scorecard."],
+  ["Four commands", "Run, compare, tune, diff. Mistakes come back with the exact command to type instead."],
   ["0 lines for CLIs", "Claude Code, Codex, OpenCode, Copilot, Gemini, aider, goose, ollama, or any command."],
   ["~5 lines for SDKs", "Default-export one function. defineHarness() is optional."],
   ["Scored, not vibed", "Tool names, argument formats, JSON schemas, files on disk, exit codes."],
@@ -164,8 +164,8 @@ export default function Landing() {
       <section className="grid gap-10 border-b border-zinc-200 px-5 py-20 md:px-10 lg:grid-cols-[1fr_2fr] xl:px-16 dark:border-zinc-800" aria-labelledby="ba">
         <div>
           <h2 id="ba" className="text-3xl font-bold tracking-tight">Change one thing.<br />Watch the number move.</h2>
-          <p className="mt-4 text-zinc-600 dark:text-zinc-400"><code className="font-mono text-sm">whip compare</code> runs the same suite per variant, so the harness is the only variable. Red is the baseline prompt, lime is the tuned one.</p>
-          <Code lang="sh" code={"whip compare ./agent.ts \\\n  --variant system=prompts/baseline.md \\\n  --variant system=prompts/tuned.md"} />
+          <p className="mt-4 text-zinc-600 dark:text-zinc-400">Give one variable two values and whip runs the same suite for each, so the prompt is the only thing that changed. Red is the baseline prompt, lime is the tuned one.</p>
+          <Code lang="sh" code={"whip ./agent.ts \\\n  -v system=@prompts/baseline.md \\\n  -v system=@prompts/tuned.md"} />
         </div>
         <div className="rounded-2xl border border-zinc-200 p-6 dark:border-zinc-800">
           <div className="mb-5 flex items-baseline gap-3"><span className="font-mono text-4xl font-bold">29% → 100%</span><span className="rounded-md bg-lime px-2 py-0.5 font-mono text-sm font-semibold text-black">+71</span><span className="text-sm text-zinc-500">13 tasks flipped</span></div>
@@ -179,10 +179,10 @@ export default function Landing() {
           <h2 id="tune" className="mt-2 text-3xl font-bold tracking-tight">Let Whip edit the prompt.<br />Keep only what scores.</h2>
           <p className="mt-4 text-zinc-600 dark:text-zinc-400">One line at a time: propose, score, keep it only if train goes up, no category drops more than 10 points and the held-out tasks don't slip. Then drop every line that isn't pulling its weight.</p>
           <ul className="mt-5 space-y-2 text-sm text-zinc-600 dark:text-zinc-400">
-            <li><span className="font-medium text-zinc-900 dark:text-white">Library mode</span> by default: offline, no model.</li>
+            <li><span className="font-medium text-zinc-900 dark:text-white">Built-in hints</span> by default: offline, no model.</li>
             <li><span className="font-medium text-zinc-900 dark:text-white">--tuner</span> turns Claude, Copilot or a local Ollama model into the editor.</li>
           </ul>
-          <Code lang="sh" code={"whip tune \"ollama run qwen2.5:1.5b\" \\\n  --tuner \"copilot --model <claude-opus-id> -p {prompt}\"\n\n# same via the preset\nwhip tune \"ollama run qwen2.5:1.5b\" --tuner copilot:<claude-opus-id>"} />
+          <Code lang="sh" code={"whip tune ./agent.ts prompts/agent.md\n\n# a model proposes the edits\nwhip tune ./agent.ts prompts/agent.md --tuner claude"} />
           <a href="#/docs/tuning" className="inline-flex h-11 items-center rounded-xl border border-zinc-300 px-5 text-sm font-medium hover:border-lime hover:bg-lime/10 dark:border-zinc-700">Read the tuning guide →</a>
         </div>
         <TuneLog />
@@ -195,7 +195,7 @@ export default function Landing() {
 
       <section className="grid gap-10 border-b border-zinc-200 px-5 py-20 md:px-10 lg:grid-cols-3 xl:px-16 dark:border-zinc-800" aria-labelledby="qs">
         <h2 id="qs" className="text-3xl font-bold tracking-tight lg:col-span-3">Quickstart</h2>
-        {[["1  Link", "bun install && bun link"], ["2  Run", "whip examples/mock-tiny.ts"], ["3  Improve", "whip suggest"]].map(([t, c]) => (
+        {[["1  Link", "bun install && bun link"], ["2  Run", "whip examples/mock-tiny.ts"], ["3  Improve", "whip tune examples/mock-tiny.ts examples/prompts/baseline.md"]].map(([t, c]) => (
           <div key={t}><h3 className="font-mono text-sm font-semibold text-lime-700 dark:text-lime">{t}</h3><Code lang="sh" code={c} /></div>
         ))}
       </section>

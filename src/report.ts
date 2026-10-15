@@ -62,7 +62,7 @@ export const HINTS = {
     lines: ["If the information is not in the prompt or tool results, say so; never invent values."] },
   length: { advice: "Set a hard length budget (\"max 1 sentence\") and give a short example answer.",
     lines: ["Be concise: answer directly and skip caveats.", "Keep answers short: max 1 sentence unless asked otherwise."] },
-  exit: { advice: "The harness exited non-zero: check its non-interactive flags, auth and permissions (`whip clis`).", lines: [] },
+  exit: { advice: "The harness exited non-zero: check its non-interactive flags, auth and permissions (`whip run --help` lists the built-in commands).", lines: [] },
   fact: { advice: "The final answer lacked an expected fact: tell the agent to restate the key tool result in its answer.",
     lines: ["Restate the key tool result in your final answer."] },
 } satisfies Record<string, { advice: string; lines: string[] }>;
@@ -82,15 +82,16 @@ export function hintKey(category: string, reason: string): HintKey {
 }
 export const hintFor = (category: string, reason: string) => HINTS[hintKey(category, reason)].advice;
 
-export function suggest(r: Run): string {
+export function suggest(r: Run, target = r.target): string {
   const hits = new Map<string, Set<string>>();
   for (const t of r.tasks) for (const a of t.attempts) if (a.failed[0]) {
     const h = hintFor(t.category, a.failed[0]);
     (hits.get(h) ?? hits.set(h, new Set()).get(h)!).add(t.id);
   }
-  if (!hits.size) return green("All tasks pass. Try a smaller model or raise --repeat to find gaps.");
+  if (!hits.size) return green("All tasks pass. Try a smaller model or raise -n to find gaps.");
   const ranked = [...hits].sort((a, b) => b[1].size - a[1].size);
-  return [bold("Whip suggest") + dim(`  ${Math.round(r.score * 100)}% · change one thing at a time, then \`whip compare\``), "",
+  const t = /\s/.test(target) ? `"${target}"` : target;
+  return [bold("Hints") + dim(`  fix one at a time, or let whip apply and score them: whip tune ${t}`), "",
     ...ranked.map(([hint, ids], i) => `  ${i + 1}. ${hint}\n     ${dim("fixes: " + [...ids].join(", "))}`)].join("\n");
 }
 

@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import type { Harness, SdkFn, ToolCall } from "./types";
+import { closest } from "./args";
+import type { Harness, HarnessContext, HarnessResult, SdkFn, ToolCall } from "./types";
 
 /** Known CLIs and their non-interactive invocation. `{prompt}` is replaced by the prompt (as one argv item). */
 export const KNOWN_CLIS: Record<string, string[]> = {
@@ -43,8 +44,11 @@ export function resolveTuner(spec: string): { argv: string[]; stdin: boolean } {
 const isFile =(t: string) => /\.(m?[jt]sx?)$/.test(t);
 export const detect = (target: string): "sdk" | "cli" => (isFile(target) && !/\s/.test(target.trim()) ? "sdk" : "cli");
 
-/** Optional helper; plain default-exported functions work too. */
-export const defineHarness = (fn: SdkFn) => fn;
+/**
+ * Optional helper for type hints; a plain default-exported function works too.
+ * Name your variables to get them typed: `defineHarness<"system" | "tools">((prompt, ctx) => ...)`.
+ */
+export const defineHarness = <K extends string = string>(fn: (prompt: string, ctx: HarnessContext<K>) => HarnessResult | Promise<HarnessResult>) => fn;
 
 /** Pull TOOL lines (`TOOL name {json}`) out of plain text: the text tool protocol any CLI/model can speak. */
 export function parseToolLines(text: string): ToolCall[] {
@@ -80,18 +84,29 @@ export function parseJsonl(out: string): { text: string; toolCalls: ToolCall[] }
   return { text, toolCalls };
 }
 
+/** A harness that also records which `ctx.vars` keys it read (SDK only), so whip can warn about variables with no effect. */
+export type TrackedHarness = Harness & { readVars?: Set<string> };
+
 /** SDK adapter: wrap `(prompt, ctx) => string | {text, toolCalls}`. */
-export async function sdkAdapter(path: string): Promise<Harness> {
+export async function sdkAdapter(path: string): Promise<TrackedHarness> {
   const mod = await import(resolve(path));
   const fn: SdkFn = mod.default ?? mod.harness;
-  if (typeof fn !== "function") throw new Error(`${path} must export a default function (prompt, ctx) => string | {text, toolCalls}`);
-  return async (input) => {
+  if (typeof fn !== "function") throw new Error(`${path} must default-export a function. Example:\n  export default async (prompt, ctx) => myModel(ctx.vars.system, prompt)`);
+  const readVars = new Set<string>();
+  const h: TrackedHarness = async (input) => {
     const t0 = performance.now();
-    const r = await fn(input.prompt, input);
+    const vars = new Proxy(input.vars, {
+      get: (t, k) => { if (typeof k === "string") readVars.add(k); return Reflect.get(t, k); },
+      has: (t, k) => { if (typeof k === "string") readVars.add(k); return Reflect.has(t, k); },
+      ownKeys: (t) => { Object.keys(t).forEach((k) => readVars.add(k)); return Reflect.ownKeys(t); },
+    });
+    const r = await fn(input.prompt, { ...input, vars });
     const out = typeof r === "string" ? { text: r } : r;
     const text = out.text ?? "";
     return { text, toolCalls: out.toolCalls ?? parseToolLines(text), ms: performance.now() - t0 };
   };
+  h.readVars = readVars;
+  return h;
 }
 
 /** Turn `whip claude` / `whip "my-agent --flag"` / `whip "agent {prompt}"` into argv. */
@@ -99,7 +114,10 @@ export function resolveCommand(target: string, vars: Record<string, string> = {}
   const parts = target.match(/"[^"]*"|'[^']*'|\S+/g)?.map((s) => s.replace(/^["']|["']$/g, "")) ?? [];
   const known = KNOWN_CLIS[parts[0]];
   if (known && parts.length === 1) return { argv: known, stdin: false };
-  if (known && parts[0] === "ollama") return { argv: known.map((a) => (a === "{model}" ? parts[1] ?? vars.model ?? "qwen2.5:0.5b" : a)), stdin: false };
+  if (known && parts[0] === "ollama" && parts.length <= 3) { // "ollama <model>" and "ollama run <model>"
+    const model = parts[1] === "run" ? parts[2] : parts[1];
+    return { argv: known.map((a) => (a === "{model}" ? model ?? vars.model ?? "qwen2.5:0.5b" : a)), stdin: false };
+  }
   const abs = parts.map((p, i) => (i > 0 && !p.startsWith("-") && existsSync(p) ? resolve(p) : p)); // tasks run in a temp dir
   return { argv: abs, stdin: !parts.some((p) => p.includes("{prompt}")) };
 }
@@ -121,6 +139,39 @@ export function cliAdapter(target: string, timeoutMs = 120_000): Harness {
     const text = j ? j.text : out.trim() || err.trim();
     return { text, toolCalls: [...(j?.toolCalls ?? []), ...parseToolLines(text)], exitCode, ms: performance.now() - t0 };
   };
+}
+
+/** Built-in targets run a fixed command, so `-v` variables never reach the agent. */
+export const isBuiltin = (target: string) => {
+  const parts = resolveCommand(target).argv;
+  return detect(target) === "cli" && Object.values(KNOWN_CLIS).some((k) => k.length === parts.length && k.every((a, i) => a === parts[i] || a === "{model}"));
+};
+
+/** How variable `key` reaches the target: always (SDK, {key} placeholder), never (built-in), or only if the command reads $WHIP_KEY. */
+export function reach(target: string, key: string): "sdk" | "placeholder" | "never" | "env" {
+  if (detect(target) === "sdk") return "sdk";
+  if (isBuiltin(target)) return "never";
+  return target.includes(`{${key}}`) ? "placeholder" : "env";
+}
+
+/** Why `target` can't run, phrased as what to do instead; undefined when it looks fine. `commands` are whip's own, for typo hints. */
+export function targetProblem(target: string, commands: string[] = []): string | undefined {
+  const t = target.trim();
+  if (detect(t) === "sdk") {
+    if (existsSync(t)) return undefined;
+    return `harness file not found: ${t}. An SDK target is a .ts/.js file that default-exports (prompt, ctx) => answer`;
+  }
+  const exe = resolveCommand(t).argv[0] ?? "";
+  if (!exe) return "empty target. Examples: whip claude · whip ./my-harness.ts · whip \"my-agent {prompt}\"";
+  if (Bun.which(exe) || (exe.includes("/") && existsSync(exe))) return undefined;
+  const single = !/\s/.test(t);
+  const cmd = single ? closest(t, commands) : undefined;
+  if (cmd) return `"${t}" is not a whip command or a program on your PATH. Did you mean: whip ${cmd}?`;
+  const cli = closest(exe, Object.keys(KNOWN_CLIS));
+  if (cli && cli !== exe) return `"${exe}" is not on your PATH. Did you mean the built-in target ${cli}?`;
+  for (const ext of [".ts", ".js"]) if (existsSync(t + ext)) return `"${t}" is not a program. Did you mean the harness file ${t}${ext}?`;
+  if (KNOWN_CLIS[exe]) return `"${exe}" is a built-in target but isn't installed (not on your PATH). Install it, or pick another target: whip run --help`;
+  return `"${exe}" is not a program on your PATH${single ? " or a whip command" : ""}. Targets: a built-in CLI (whip run --help lists them), ./my-harness.ts, or a quoted command like "my-agent {prompt}"`;
 }
 
 export async function makeHarness(target: string) {

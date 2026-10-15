@@ -222,6 +222,8 @@ export type TuneOpts = {
   proposer: Proposer; budget?: number; holdout?: number; seed?: number; heldoutIds?: string[];
   maxRounds?: number; prune?: boolean; recheck?: boolean;
   confirm?: (estimate: string) => Promise<boolean>; log?: (line: string) => void;
+  /** Runs once after the baseline is scored; throw to stop before any edit is tried. */
+  afterBaseline?: () => void | Promise<void>;
 };
 export type TuneResult = TuneLog & { aborted?: boolean; baselineRun: Run; finalRun: Run };
 
@@ -276,6 +278,7 @@ export async function tune(o: TuneOpts): Promise<TuneResult> {
   let curTrain = await run(split.train, lines.join("\n"));
   let curHeld = hasHeld ? await run(split.heldout, lines.join("\n")) : undefined;
   const baseTrain = curTrain, baseHeld = curHeld;
+  await o.afterBaseline?.();
   log(dim(`baseline  train ${pts(curTrain.score)}% (${split.train.length} tasks) · held-out ${hasHeld ? pts(curHeld!.score) + "%" : "–"} (${split.heldout.length} tasks) · ${o.proposer.label}`));
 
   const steps: TuneStep[] = [];

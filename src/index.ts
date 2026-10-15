@@ -1,2 +1,2 @@
-export { defineHarness, KNOWN_CLIS } from "./adapters";
-export type { Harness, HarnessInput, SdkFn, Task, Check, ToolSpec, ToolCall, Run } from "./types";
+export { defineHarness } from "./adapters";
+export type { HarnessContext, HarnessResult, ToolCall, ToolSpec, Task, Check, Run } from "./types";

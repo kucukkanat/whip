@@ -1,211 +1,277 @@
 #!/usr/bin/env bun
-import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { KNOWN_CLIS, makeHarness, TUNER_CLIS } from "./adapters";
+import { detect, KNOWN_CLIS, makeHarness, reach, resolveTuner, targetProblem, TUNER_CLIS, type TrackedHarness } from "./adapters";
+import { checkConfig, checkKey, closest, COMMANDS, type Command, type Config, count, fail, parseArgs, parseVariant, removedCommand, type Variant } from "./args";
 import { loadTasks, runSuite } from "./engine";
 import { bold, diff, dim, html, scorecard, suggest, yellow } from "./report";
 import { confirmGate, libraryProposer, tune, tunerProposer, tuneSummary, writeTune } from "./tune";
 import type { Run } from "./types";
 
-const HELP = `${bold("whip")} - evaluate agent harnesses, not models
+const table = (t: Record<string, string[]>) => Object.entries(t).map(([k, v]) => `    ${k.padEnd(9)} ${v.join(" ")}`).join("\n");
 
-  whip [run] <target>              run the default suite, print a scorecard
-  whip compare <target> --variant k=v --variant k=v   one change at a time, deltas vs first
-  whip diff [runA] [runB]          compare two saved runs (paths, ids, or "latest", "latest~1")
-  whip suggest [run]               rule-based hints for the failures in a run
-  whip report [runs...]            write a static HTML report
-  whip tune <target> [--tuner <cmd>] [--target-file system] [--budget N] [--holdout 0.3] [--yes] [--write]
-                                   improve the instructions: greedy edits, kept only if train rises,
-                                   no category drops >10 points and held-out tasks don't drop
-  whip clis                        list known CLIs and how they are invoked
-  whip <command> --help            details for one command
+const HELP = `${bold("whip")} - score an agent harness, then improve its prompt
 
-  target: claude | codex | opencode | copilot | gemini | aider | goose | "ollama <model>"
-          ./harness.ts (SDK: default-exported function) | "any-cmd --flag" (prompt on stdin, or {prompt})
-  flags:  -n/--repeat N (3)  --only <regex|category>  -v/--variant key=value|key=file  --evals <dir> (./evals)
-          --no-save  -h/--help     config: optional whip.config.ts (default export)
-  tune:   --tuner claude | copilot[:model] | codex | gemini | opencode | ollama:<model> | "any-cmd {prompt}"
-            (default: no model, the \`whip suggest\` hint library). Must reply {"edits":[{op,line,target?,reason}]}
-          --target-file key[=file] variant the edits go to (system → ctx.vars.system / $WHIP_SYSTEM);
-            start file also via --variant system=prompt.md   --budget N tuner calls (5)
-          --holdout 0.3 --seed 1  seeded held-out split    -y/--yes skip the confirm prompt (required without a TTY)
-          --write  also overwrite the prompt file (otherwise only .whip/tuned.md is written)
-          --timeout ms  per tuner call (300000)
-  env:    NO_COLOR disables colors · WHIP_<KEY> is set for CLI targets from each variant key
-  exit:   0 done (whatever the score) · 1 error, or tune aborted / needs --yes`;
+  whip <target>                                   run the tasks, print a scorecard and hints
+  whip <target> -v system=@a.md -v system=@b.md   compare two prompts: one run each, then the diff
+  whip tune <target> prompts/a.md                 let whip edit the prompt; only edits that score better stay
+  whip diff [old] [new]                           compare two saved runs (default: the last two)
 
-const SUITE_FLAGS = `  -n, --repeat N          attempts per task (default 3, or config \`repeat\`)
-  --only <regex|category> keep tasks whose id matches the regex or whose category equals it (or config \`only\`)
-  --evals <dir>           extra task directory, added to the built-in suite (default ./evals, or config \`evals\`)
-  -v, --variant k=v       set a variable for the harness; repeatable. A value that is an existing file is
-                          replaced by its contents. "k=v,k2=v2" sets several keys in one variant
-  --no-save               don't write .whip/runs/<id>.json or .whip/report.html
-  -h, --help              this help`;
+  <target>  claude | codex | opencode | copilot | gemini | aider | goose | "ollama <model>"   (built-in CLIs)
+            ./my-harness.ts            your code: default-export (prompt, ctx) => answer
+            "my-agent --flag {prompt}" any command: the prompt goes at {prompt}, otherwise on stdin
 
-/** `whip <command> --help`. Keys are subcommand names. */
-const CMD_HELP: Record<string, string> = {
-  run: `${bold("whip [run] <target>")} - run the suite against a harness, print a scorecard
+  -v key=value      a variable for your harness; key=@file reads a file
+                    reaches it as ctx.vars.key (code) or $WHIP_KEY / {key} (commands)
+  -n N              attempts per task (3)           --only <regex|category>  run some tasks
+  --evals <dir>     your own tasks (./evals)        --no-save                write nothing to .whip/
 
-  <target>  claude | codex | opencode | copilot | gemini | aider | goose | "ollama <model>"
-            a single .ts/.js/.tsx/.jsx/.mts/.mjs path: SDK adapter (default-exported function)
-            anything else: a command; the prompt goes where {prompt} is, otherwise on stdin
-            optional when whip.config.ts sets \`target\`
+  details: whip run --help · whip tune --help · whip diff --help`;
+
+const SUITE_FLAGS = `  -v, --variant key=value  a variable for your harness; key=@path reads a file. Repeat a key to compare values:
+                           -v system=@a.md -v system=@b.md runs twice. Keys given once apply to every run.
+  -n, --repeat N           attempts per task (default 3)
+  --only <regex|category>  only tasks whose id matches or whose category equals it
+  --evals <dir>            your own task files, added to the built-in suite (default ./evals)
+  --no-save                don't write .whip/runs/ or .whip/report.html
+  -h, --help               this help`;
+
+const CMD_HELP: Record<Command, string> = {
+  run: `${bold("whip [run] <target>")} - run the tasks against a harness, print a scorecard and hints
+
+  <target>  a built-in CLI, a .ts/.js harness file, or any quoted command (see below)
+            optional when whip.config.ts sets target
 
 ${SUITE_FLAGS}
 
-  Each --variant runs the suite once; with two or more, later runs print a diff vs the first.
-  Variants reach SDK harnesses as ctx.vars.<k>, CLIs as $WHIP_<K> and {k} placeholders.
+  Built-in targets run exactly this ({prompt} = the task prompt):
+${table(KNOWN_CLIS)}
+  They don't receive -v variables. To pass one, use your own command, e.g.
+    whip "claude -p {prompt} --append-system-prompt {system}" -v system=@a.md
+
+  Variables reach your harness as ctx.vars.<key> (.ts/.js), and as $WHIP_<KEY> and {key} (commands).
   Writes .whip/runs/<id>.json and .whip/report.html. Exit 0 whatever the score, 1 on error.`,
-  compare: `${bold("whip compare <target> --variant k=v --variant k=v")} - one change at a time, deltas vs the first
+  tune: `${bold("whip tune <target> [prompt-file]")} - improve a prompt: try one edit at a time, keep it only if
+the score rises, no category drops more than 10 points and held-out tasks don't drop
 
-  Runs the suite once per variant. The first is the baseline; each later one prints per-category
-  deltas and the tasks that changed ("flipped" = crossed 0% or 100%).
-  Without --variant, uses config \`variants\` (only compare reads them).
+  whip tune ./my-harness.ts prompts/a.md                  edit prompts/a.md (as ctx.vars.system), no model needed
+  whip tune ./my-harness.ts prompts/a.md --tuner claude   let a model propose the edits
+  whip tune ./my-harness.ts prompts/a.md --write          also save the result into prompts/a.md
 
-${SUITE_FLAGS}`,
-  diff: `${bold("whip diff [runA] [runB]")} - compare two saved runs (default: latest~1 latest)
+  [prompt-file]  the starting prompt (default: -v system=..., else empty). Saved to .whip/tuned.md
+  --key <name>   the variable being tuned (default system → ctx.vars.system, $WHIP_SYSTEM, {system})
+  --tuner <cmd>  who proposes edits. Default: whip's built-in hints (offline). Presets:
+${table(TUNER_CLIS)}
+                 name:<model> adds --model <model> (ollama:<model> picks the model). Or any command
+                 that reads the prompt at {prompt} or on stdin and replies {"edits":[{op,line,target?,reason}]}
+  --budget N     max tuner calls (default 5)
+  --write        overwrite the prompt file with the result (otherwise only .whip/tuned.md)
+  -y, --yes      don't ask before calling the tuner (needed when there's no terminal, e.g. CI)
+  -v, -n, --only, --evals, --no-save   as in whip run --help
 
-  run refs: latest | latest~N (N runs before the latest) | a run id in .whip/runs (.json optional) | a path
-  Prints per-category deltas and the tasks that changed. Reads only; writes nothing.`,
-  suggest: `${bold("whip suggest [run]")} - rule-based hints for the failures in a run (default: latest)
+  Rarely needed, in whip.config.ts: tune: { holdout: 0.3, seed: 1, timeout: 300000 }`,
+  diff: `${bold("whip diff [old] [new]")} - compare two saved runs, then show hints for the newer one
 
-  Maps each attempt's first failure + task category to one instruction change, ranked by how many
-  tasks it would fix. No model involved. Run refs as in \`whip diff --help\`.`,
-  report: `${bold("whip report [runs...]")} - write a static HTML report to .whip/report.html
-
-  One column per run, in the order given (default: latest). Run refs as in \`whip diff --help\`.`,
-  clis: `${bold("whip clis")} - list known CLI targets and --tuner presets with the exact argv they run`,
-  tune: `${bold("whip tune <target>")} - improve the instructions: greedy edits, kept only if train rises,
-no category drops >10 points and held-out tasks don't drop
-
-  --tuner <cmd>             editor: claude | copilot[:model] | codex | gemini | opencode | ollama:<model>
-                            | name:<model> (adds --model) | "any-cmd {prompt}" (prompt on stdin without {prompt})
-                            default: no model, the \`whip suggest\` hint library. Must reply {"edits":[{op,line,target?,reason}]}
-  --target-file key[=file]  variant the edits go to (default system → ctx.vars.system / $WHIP_SYSTEM).
-                            Starting text: the file, else --variant key=..., else empty
-  --budget N                max tuner calls (default 5; library mode ignores it)
-  --holdout F               share of tasks held out, 0 to 0.9 (default 0.3)
-  --seed N                  seed for the held-out split (default 1)
-  -y, --yes                 skip the confirm prompt before tuner calls (required without a TTY)
-  --write                   also overwrite the --target-file file (otherwise only .whip/tuned.md)
-  --timeout ms              per tuner call (default 300000)
-  --no-save                 write only .whip/tuned.md (no tune-<id>.json, report or runs)
-  -n, --repeat N / --only / --evals / -v, --variant   as in \`whip run --help\` (config \`variants\` is not used)
-
-  Exit 1 when the confirm prompt is declined, or --tuner runs without a TTY and without --yes.`,
+  run refs: latest | latest~N (N runs before the latest) | a run id from .whip/runs | a path
+  default: latest~1 latest
+  --html   also write both runs to .whip/report.html`,
 };
-
-type Config = { target?: string; repeat?: number; variants?: Record<string, string>[]; evals?: string; only?: string };
-
-function parseArgs(argv: string[]) {
-  const pos: string[] = [], variants: string[] = [], o: Record<string, string | boolean> = {};
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === "--variant" || a === "-v") variants.push(argv[++i]);
-    else if (a === "-n" || a === "--repeat") o.repeat = argv[++i];
-    else if (a === "--no-save") o.noSave = true;
-    else if (a === "--yes" || a === "-y") o.yes = true;
-    else if (a === "--write") o.write = true;
-    else if (a === "-h" || a === "--help") o.help = true;
-    else if (a.startsWith("--")) o[a.slice(2)] = argv[++i];
-    else pos.push(a);
-  }
-  return { pos, variants, o };
-}
 
 const RUNS = ".whip/runs";
 const listRuns = () => (existsSync(RUNS) ? readdirSync(RUNS).filter((f) => f.endsWith(".json")).sort() : []);
-function loadRun(ref = "latest"): Run {
-  const m = ref.match(/^latest(?:~(\d+))?$/);
+function loadRun(ref: string): Run {
   const rs = listRuns();
-  const p = m ? join(RUNS, rs[rs.length - 1 - Number(m[1] ?? 0)] ?? "") : existsSync(ref) ? ref : join(RUNS, ref.replace(/\.json$/, "") + ".json");
-  if (!existsSync(p) || p === RUNS + "/") throw new Error(`run not found: ${ref} (saved runs live in ${RUNS})`);
-  return JSON.parse(readFileSync(p, "utf8"));
+  if (!rs.length && !existsSync(ref)) fail(`no saved runs yet in ${RUNS}. Run something first: whip <target>`);
+  const m = ref.match(/^latest(?:~(\d+))?$/);
+  const p = m ? (rs[rs.length - 1 - Number(m[1] ?? 0)] && join(RUNS, rs[rs.length - 1 - Number(m[1] ?? 0)])) : existsSync(ref) ? ref : join(RUNS, ref.replace(/\.json$/, "") + ".json");
+  if (!p || !existsSync(p)) fail(`run not found: ${ref}. There ${rs.length === 1 ? "is 1 saved run" : `are ${rs.length} saved runs`}: use latest${rs.length > 1 ? ` to latest~${rs.length - 1}` : ""}, an id from ${RUNS}, or a path`);
+  return JSON.parse(readFileSync(p!, "utf8"));
 }
 
-/** `system=prompts/a.md` → label `prompts/a.md`, value = file contents. Plain values pass through. */
-const parseVariant = (s: string) => {
-  const out: Record<string, string> = {};
-  for (const kv of s.split(",")) { const i = kv.indexOf("="); if (i > 0) out[kv.slice(0, i)] = kv.slice(i + 1); }
-  return out;
-};
-const load = (v: Record<string, string>) => Object.fromEntries(Object.entries(v).map(([k, x]) => [k, existsSync(x) ? readFileSync(x, "utf8") : x]));
+const quote = (s: string) => (/\s/.test(s) ? `"${s}"` : s);
+const warn = (s: string) => console.error(yellow(`whip: ${s}`));
 
-async function save(run: Run, noSave: boolean) {
-  if (noSave) return;
-  mkdirSync(RUNS, { recursive: true });
-  await Bun.write(join(RUNS, `${run.id}.json`), JSON.stringify(run, null, 2));
+/**
+ * Turn -v flags (or config variants) into runs. A key given once is shared by every run; a key given several times
+ * gives one run per value. Only one key may vary, so each comparison has one cause.
+ */
+export function variantSets(vs: Variant[]): { vars: Record<string, string>; labels: Record<string, string> }[] {
+  const by = new Map<string, Variant[]>();
+  for (const v of vs) (by.get(v.key) ?? by.set(v.key, []).get(v.key)!).push(v);
+  const varying = [...by].filter(([, xs]) => xs.length > 1).map(([k]) => k);
+  if (varying.length > 1) fail(`only one variable can change between runs, but ${varying.join(" and ")} both have several values. Compare one change at a time, or list exact combinations in whip.config.ts: variants: [{ ${varying.map((k) => `${k}: "..."`).join(", ")} }, ...]`);
+  const shared = [...by].filter(([, xs]) => xs.length === 1).map(([, xs]) => xs[0]);
+  const rows = varying.length ? by.get(varying[0])!.map((v) => [...shared, v]) : [shared];
+  return rows.map((r) => ({ vars: Object.fromEntries(r.map((v) => [v.key, v.value])), labels: Object.fromEntries(r.map((v) => [v.key, v.label])) }));
 }
 
-async function main() {
-  const [cmd0, ...rest] = process.argv.slice(2);
-  const sub = ["compare", "diff", "suggest", "report", "clis", "run", "tune"].includes(cmd0) ? cmd0 : "run";
-  const { pos, variants, o } = parseArgs(sub === "run" && cmd0 !== "run" ? [cmd0, ...rest].filter(Boolean) : rest);
-  if (o.help || (!cmd0 && !existsSync("whip.config.ts"))) return console.log((o.help && Object.hasOwn(CMD_HELP, cmd0 ?? "") && CMD_HELP[cmd0]) || HELP);
+async function loadConfig(): Promise<Config | undefined> {
+  if (!existsSync("whip.config.ts")) return undefined;
+  return checkConfig((await import(resolve("whip.config.ts"))).default);
+}
 
-  if (sub === "clis") {
-    const table = (t: Record<string, string[]>) => Object.entries(t).map(([k, v]) => `  ${k.padEnd(9)} ${v.join(" ")}`).join("\n");
-    return console.log(`${table(KNOWN_CLIS)}\n\n${dim("as --tuner (editor, tools off):")}\n${table(TUNER_CLIS)}`);
-  }
-  if (sub === "diff") { const a = loadRun(pos[0] ?? "latest~1"), b = loadRun(pos[1] ?? "latest"); return console.log(diff(a, b)); }
-  if (sub === "suggest") return console.log(suggest(loadRun(pos[0])));
-  if (sub === "report") {
-    const runs = (pos.length ? pos : ["latest"]).map(loadRun);
-    await Bun.write(".whip/report.html", html(runs));
-    return console.log(`wrote ${resolve(".whip/report.html")}`);
-  }
+/** Config `variants: [{system: "@a.md"}]` → one set per entry, same rules as -v. */
+const configSets = (cfg: Config) => cfg.variants!.map((o) => {
+  const vs = Object.entries(o).map(([k, v]) => parseVariant(`${k}=${v}`, "whip.config.ts variants:"));
+  return { vars: Object.fromEntries(vs.map((v) => [v.key, v.value])), labels: Object.fromEntries(vs.map((v) => [v.key, v.label])) };
+});
 
-  const cfg: Config = existsSync("whip.config.ts") ? (await import(resolve("whip.config.ts"))).default : {};
+function suite(flags: Record<string, string | true>, cfg: Config) {
+  const repeat = count(flags.repeat ?? cfg.repeat, "-n", "-n 5") ?? 3;
+  const only = (flags.only as string | undefined) ?? cfg.only;
+  if (only) try { new RegExp(only); } catch { fail(`--only "${only}" is not a valid regex. Use a task id pattern like "^tool-" or a category like format`); }
+  const evals = String(flags.evals ?? cfg.evals ?? "evals");
+  if ((flags.evals || cfg.evals) && !existsSync(evals)) fail(`--evals ${evals}: directory not found`);
+  const tasks = loadTasks(evals, only);
+  if (!tasks.length) {
+    const all = loadTasks(evals);
+    const g = only && closest(only, [...new Set(all.map((t) => t.category))]);
+    fail(`--only ${only} matched no tasks.${g ? ` Did you mean --only ${g}?` : ""} Categories: ${[...new Set(all.map((t) => t.category))].join(", ")}`);
+  }
+  return { repeat, tasks };
+}
+
+function pickTarget(pos: string[], cfg: Config, cmd: Command, max: number): string {
+  if (pos.length > max) {
+    const last = pos.at(-1)!, file = existsSync(last) && /\.(md|txt)$/.test(last) ? last : undefined;
+    if (cmd === "run" && file && pos.length === 2) fail(`to use ${file} as the prompt: whip ${quote(pos[0])} -v system=@${file}`);
+    const parts = cmd === "tune" && file ? pos.slice(0, -1) : pos;
+    fail(`too many arguments. If the target is a command with spaces, quote it: whip ${cmd === "run" ? "" : `${cmd} `}"${parts.join(" ")}"${cmd === "tune" && file ? ` ${file}` : ""}`);
+  }
   const target = pos[0] ?? cfg.target;
-  if (!target) throw new Error("no target. Try: whip claude, whip ./my-harness.ts, or set target in whip.config.ts");
-  const repeat = Number(o.repeat ?? cfg.repeat ?? 3);
-  const tasks = loadTasks(String(o.evals ?? cfg.evals ?? "evals"), (o.only as string) ?? cfg.only);
+  if (!target) fail(`no target. Examples: whip claude · whip ./my-harness.ts · whip "my-agent {prompt}"  (or set target in whip.config.ts)`);
+  const problem = targetProblem(target!, [...COMMANDS, "compare", "suggest", "report", "clis", "help"]);
+  if (problem) fail(problem);
+  return target!;
+}
+
+async function main(argv: string[]) {
+  const [first, ...rest] = argv;
+  if (first === "-h" || first === "--help" || (!first && !existsSync("whip.config.ts"))) return console.log(HELP);
+  if (first === "help") return console.log((COMMANDS as readonly string[]).includes(rest[0]) ? CMD_HELP[rest[0] as Command] : HELP);
+  const moved = removedCommand(first, rest);
+  if (moved) fail(moved);
+  const cmd: Command = (COMMANDS as readonly string[]).includes(first) ? (first as Command) : "run";
+  const typo = first && cmd === "run" && first !== "run" && !/[\s./]/.test(first) && !first.startsWith("-") && !Bun.which(first) && closest(first, [...COMMANDS, "help"]);
+  if (typo) fail(`"${first}" is not a whip command or a program on your PATH. Did you mean: whip ${typo}${rest.length ? " " + rest.map(quote).join(" ") : ""}?`);
+  const { pos, flags, variants } = parseArgs(cmd, cmd === "run" && first !== "run" ? argv : rest);
+  if (flags.help) return console.log(CMD_HELP[cmd]);
+
+  if (cmd === "diff") {
+    if (pos.length > 2) fail(`whip diff takes at most two runs, e.g. whip diff latest~1 latest`);
+    const a = loadRun(pos[0] ?? "latest~1"), b = loadRun(pos[1] ?? "latest");
+    console.log(diff(a, b) + "\n\n" + suggest(b));
+    if (flags.html) { await Bun.write(".whip/report.html", html([a, b])); console.log(dim(`wrote ${resolve(".whip/report.html")}`)); }
+    return;
+  }
+
+  const cfg = (await loadConfig()) ?? {};
+  if (cmd === "tune") return tuneCmd(pos, flags, variants, cfg);
+
+  const target = pickTarget(pos, cfg, "run", 1);
+  const { repeat, tasks } = suite(flags, cfg);
+  const parsed = variants.map((v) => parseVariant(v));
+  parsed.forEach((v) => v.warning && warn(v.warning));
+  const sets = parsed.length ? variantSets(parsed) : cfg.variants?.length ? configSets(cfg) : [{ vars: {}, labels: {} }];
+  const keys = [...new Set(sets.flatMap((s) => Object.keys(s.vars)))];
+  if (keys.length && reach(target, keys[0]) === "never") {
+    warn(`built-in targets don't receive variables, so ${keys.map((k) => `-v ${k}`).join(", ")} has no effect on ${target}.\n  ${passVarHint(target, keys[0], `whip %s -v ${keys[0]}=@prompts/a.md`)}`);
+  }
   const { adapter, harness } = await makeHarness(target);
-  if (sub === "tune") return tuneCmd(target, adapter, harness, tasks, repeat, variants, o);
-  const sets = variants.length ? variants.map(parseVariant) : cfg.variants?.length && sub === "compare" ? cfg.variants : [{}];
   console.error(dim(`whip: ${target} → ${adapter} adapter · ${tasks.length} tasks × ${repeat}${sets.length > 1 ? ` × ${sets.length} variants` : ""}`));
 
   const runs: Run[] = [];
-  for (const v of sets) {
+  for (const s of sets) {
     let done = 0;
-    const run = await runSuite({ harness, target, adapter, tasks, repeat, vars: load(v), onTask: () => process.stderr.isTTY && process.stderr.write(`\r${dim(`  ${++done}/${tasks.length}`)}`) });
-    run.variant = v;
+    const run = await runSuite({ harness, target, adapter, tasks, repeat, vars: s.vars, onTask: () => process.stderr.isTTY && process.stderr.write(`\r${dim(`  ${++done}/${tasks.length}`)}`) });
+    run.variant = s.labels;
     if (process.stderr.isTTY) process.stderr.write("\r\x1b[K");
-    await save(run, !!o.noSave);
+    if (!flags["no-save"]) { mkdirSync(RUNS, { recursive: true }); await Bun.write(join(RUNS, `${run.id}.json`), JSON.stringify(run, null, 2)); }
     runs.push(run);
     console.log(scorecard(run) + "\n");
+    if (runs.length === 1) unread(harness, keys).forEach((k) => warn(`${target} never read ctx.vars.${k}, so -v ${k} had no effect. Use it in your harness, e.g. myModel(ctx.vars.${k}, prompt)`));
   }
   for (const r of runs.slice(1)) console.log(diff(runs[0], r, Object.values(r.variant).join(",")) + "\n");
-  if (!o.noSave) { await Bun.write(".whip/report.html", html(runs)); console.log(dim(`saved ${RUNS}/${runs.at(-1)!.id}.json · report .whip/report.html · next: whip suggest`)); }
+  console.log(suggest(runs.at(-1)!) + "\n");
+  if (!flags["no-save"]) { await Bun.write(".whip/report.html", html(runs)); console.log(dim(`saved ${RUNS}/${runs.at(-1)!.id}.json · report .whip/report.html`)); }
 }
 
-async function tuneCmd(target: string, adapter: "sdk" | "cli", harness: Awaited<ReturnType<typeof makeHarness>>["harness"], tasks: ReturnType<typeof loadTasks>, repeat: number, variants: string[], o: Record<string, string | boolean>) {
-  const [key, keyFile] = String(o["target-file"] ?? "system").split(/=(.*)/s);
-  const vs: Record<string, string> = Object.assign({}, ...variants.map(parseVariant));
-  const src = keyFile ?? vs[key];
-  const file = src && existsSync(src) ? src : undefined;
-  const instructions = file ? readFileSync(file, "utf8") : src ?? "";
-  delete vs[key];
-  const tunerSpec = typeof o.tuner === "string" ? o.tuner : undefined;
-  console.error(dim(`whip tune: ${target} → ${adapter} adapter · ${tasks.length} tasks × ${repeat} · edits ${key}${file ? ` (from ${file})` : ""} · ${tunerSpec ? `tuner: ${tunerSpec}` : "library mode (no model)"}`));
+/** How to get variable `key` into a built-in target; `usage` has %s where the new target goes. */
+function passVarHint(target: string, key: string, usage: string): string {
+  const exe = target.trim().split(/\s+/)[0];
+  if (exe === "claude") return `Use a command that passes it: ${usage.replace("%s", `"claude -p {prompt} --append-system-prompt {${key}} --output-format stream-json --verbose --allowedTools Read,Edit,Write,Bash"`)}`;
+  if (exe === "ollama") return `"ollama run" has no system-prompt flag. Use a 5-line harness that calls Ollama's API with system: ctx.vars.${key} (see examples/ollama.ts), then: ${usage.replace("%s", "./ollama.ts")}`;
+  return `Wrap it in a command or script that reads $WHIP_${key.toUpperCase()} (or put {${key}} in the command), e.g. ${usage.replace("%s", `"${exe} ... {${key}} {prompt}"`)}`;
+}
+
+/** SDK harnesses record which ctx.vars they read; any of `keys` it never touched made no difference. */
+const unread = (h: TrackedHarness, keys: string[]) => (h.readVars ? keys.filter((k) => !h.readVars!.has(k)) : []);
+
+async function tuneCmd(pos: string[], flags: Record<string, string | true>, rawVariants: string[], cfg: Config) {
+  // `whip tune prompts/a.md` with the target in whip.config.ts
+  if (pos.length === 1 && cfg.target && existsSync(pos[0]) && statSync(pos[0]).isFile() && detect(pos[0]) === "cli") pos = [cfg.target, pos[0]];
+  const key = String(flags.key ?? cfg.tune?.key ?? "system");
+  checkKey(key, "--key");
+  const named = pos[0] ?? cfg.target;
+  if (named && pos.length <= 2 && reach(named, key) === "never") // before "is it installed?": tuning a built-in can't work at all
+    fail(`built-in targets don't receive variables, so ${named} would never see the prompt being tuned and the score couldn't change.\n  ${passVarHint(named, key, `whip tune %s ${pos[1] ?? "prompts/a.md"}`)}`);
+  const target = pickTarget(pos, cfg, "tune", 2);
+  const file = pos[1];
+  if (file && (!existsSync(file) || !statSync(file).isFile())) fail(`prompt file not found: ${file}${/\s/.test(file) ? `. If "${file}" is part of the target command, quote the whole command` : ""}`);
+  const vs = rawVariants.map((v) => parseVariant(v));
+  vs.forEach((v) => v.warning && warn(v.warning));
+  const dup = vs.find((v, i) => vs.findIndex((x) => x.key === v.key) !== i);
+  if (dup) fail(`-v ${dup.key} is given twice. whip tune edits one prompt; to compare prompts use: whip ${quote(target)} -v ${dup.key}=@a.md -v ${dup.key}=@b.md`);
+  const start = vs.find((v) => v.key === key);
+  if (file && start) fail(`the starting prompt is given twice (${file} and -v ${key}=...). Drop one: whip tune ${quote(target)} ${file}`);
+  if (flags.write && !file) fail(`--write saves the result into a prompt file, but none was given. Usage: whip tune ${quote(target)} prompts/a.md --write`);
+
+  const r0 = reach(target, key);
+  if (r0 === "env") console.error(dim(`whip tune: ${target} gets the prompt as $WHIP_${key.toUpperCase()}; make sure it reads it (or put {${key}} in the command)`));
+
+  const tunerSpec = (flags.tuner as string | undefined) ?? cfg.tune?.tuner;
+  if (tunerSpec) {
+    const exe = resolveTuner(tunerSpec).argv[0] ?? "";
+    if (!Bun.which(exe) && !existsSync(exe)) {
+      const g = closest(tunerSpec.split(":")[0], Object.keys(TUNER_CLIS));
+      fail(`--tuner ${tunerSpec}: "${exe}" is not on your PATH.${g && g !== exe ? ` Did you mean --tuner ${g}?` : ""} Presets: ${Object.keys(TUNER_CLIS).join(", ")}, or any command (see whip tune --help)`);
+    }
+  }
+  const budget = count(flags.budget ?? cfg.tune?.budget, "--budget", "--budget 3") ?? 5;
+  if (flags.budget && !tunerSpec) warn("--budget limits --tuner calls; without --tuner it has no effect");
+  const holdout = Number(cfg.tune?.holdout ?? 0.3), seed = Number(cfg.tune?.seed ?? 1);
+  if (!(holdout >= 0 && holdout <= 0.9)) fail(`whip.config.ts tune.holdout must be between 0 and 0.9, got ${cfg.tune?.holdout}`);
+  const { repeat, tasks } = suite(flags, cfg);
+
+  const instructions = file ? readFileSync(file, "utf8") : start?.value ?? "";
+  if (!instructions.trim()) console.error(dim(`whip tune: starting from an empty prompt. To start from yours: whip tune ${quote(target)} prompts/a.md`));
+  const vars = Object.fromEntries(vs.filter((v) => v.key !== key).map((v) => [v.key, v.value]));
+  const { adapter, harness } = await makeHarness(target);
+  console.error(dim(`whip tune: ${target} → ${adapter} adapter · ${tasks.length} tasks × ${repeat} · edits ${key}${file ? ` (from ${file})` : ""} · ${tunerSpec ? `tuner: ${tunerSpec}` : "built-in hints (no model)"}`));
   const r = await tune({
-    harness, target, adapter, tasks, repeat, key, instructions, vars: load(vs),
-    proposer: tunerSpec ? tunerProposer(tunerSpec, o.timeout ? Number(o.timeout) : undefined) : libraryProposer(),
-    budget: Number(o.budget ?? 5), holdout: Number(o.holdout ?? 0.3), seed: Number(o.seed ?? 1),
+    harness, target, adapter, tasks, repeat, key, instructions, vars,
+    proposer: tunerSpec ? tunerProposer(tunerSpec, cfg.tune?.timeout) : libraryProposer(),
+    budget, holdout, seed,
     log: (l) => console.log(l),
+    afterBaseline: () => {
+      if (unread(harness, [key]).length) fail(`${target} never read ctx.vars.${key}, so editing it can't change the score. Pass it to your model, e.g.\n  export default async (prompt, ctx) => myModel(ctx.vars.${key}, prompt)`);
+    },
     confirm: async (estimate) => {
       console.error(`whip tune will make ${estimate}.`);
-      const g = await confirmGate({ yes: !!o.yes, tty: !!process.stdin.isTTY, question: "Continue? [y/N] ", ask: (q) => prompt(q) });
-      if (g === "need-yes") throw new Error("--tuner calls an external CLI and needs confirmation, but stdin is not a TTY. Re-run with --yes.");
+      const g = await confirmGate({ yes: !!flags.yes, tty: !!process.stdin.isTTY, question: "Continue? [y/N] ", ask: (q) => prompt(q) });
+      if (g === "need-yes") fail("--tuner calls an external CLI and needs confirmation, but there is no terminal to ask in. Add --yes to go ahead.");
       return g === "go";
     },
   });
   if (r.aborted) { console.error("whip tune: aborted, nothing was called"); process.exit(1); }
-  const files = await writeTune(r, ".whip", !o.noSave);
+  const files = await writeTune(r, ".whip", !flags["no-save"]);
   console.log(tuneSummary(r));
-  if (o.write && file) { await Bun.write(file, r.instructions.after.trim() + "\n"); console.log(`  updated ${file}`); }
-  else if (o.write) console.log(yellow("  --write: no prompt file to update (pass --target-file system=prompt.md); see .whip/tuned.md"));
-  console.log(dim(`  wrote ${files.join(" · ")}${o.write && file ? "" : `\n  try it: whip ${file ? `compare ${target} --variant ${key}=${file}` : target} --variant ${key}=.whip/tuned.md`}`));
+  if (flags.write && file) { await Bun.write(file, r.instructions.after.trim() + "\n"); console.log(`  updated ${file}`); }
+  console.log(dim(`  wrote ${files.join(" · ")}`));
+  if (!flags.write) console.log(dim(`  compare: whip ${quote(target)}${file ? ` -v ${key}=@${file}` : ""} -v ${key}=@.whip/tuned.md${file ? `   keep it: add --write, or copy .whip/tuned.md to ${file}` : ""}`));
 }
 
-main().catch((e) => { console.error(`whip: ${(e as Error).message}`); process.exit(1); });
+if (import.meta.main) main(process.argv.slice(2)).catch((e) => {
+  console.error(`whip: ${(e as Error).message}`);
+  process.exit(1);
+});
